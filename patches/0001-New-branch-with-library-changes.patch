@@ -1,0 +1,3108 @@
+From 63f8907d4e32ebd05dcfb34455d274a4af253161 Mon Sep 17 00:00:00 2001
+From: Kyle Benac <kyle.benac@gmail.com>
+Date: Fri, 4 Oct 2019 11:01:18 -0700
+Subject: [PATCH] New branch with library changes
+
+---
+ flask_security/changeable.py                  |   4 +-
+ flask_security/cli.py                         |   2 +-
+ flask_security/confirmable.py                 |   8 +-
+ flask_security/core.py                        | 106 ++++--
+ flask_security/datastore.py                   |  16 +-
+ flask_security/decorators.py                  |  14 +-
+ flask_security/forms.py                       |  17 +-
+ flask_security/passwordless.py                |   6 +-
+ flask_security/recoverable.py                 |  14 +-
+ flask_security/registerable.py                |   8 +-
+ flask_security/script.py                      |   2 +-
+ flask_security/templates/security/base.html   |  30 ++
+ .../templates/security/change_password.html   |   5 +-
+ .../templates/security/forgot_password.html   |   4 +
+ .../templates/security/login_user.html        |   5 +-
+ .../templates/security/register_user.html     |   4 +
+ .../templates/security/reset_password.html    |   4 +
+ .../templates/security/send_confirmation.html |   4 +
+ .../templates/security/send_login.html        |   4 +
+ .../de_DE/LC_MESSAGES/flask_security.po       |  69 ++--
+ .../es_ES/LC_MESSAGES/flask_security.po       | 328 +++++++++++++++++
+ .../fr_FR/LC_MESSAGES/flask_security.po       |   2 +-
+ .../ja_JP/LC_MESSAGES/flask_security.po       | 328 +++++++++++++++++
+ .../nl_NL/LC_MESSAGES/flask_security.po       | 329 ++++++++++++++++++
+ .../pt_BR/LC_MESSAGES/flask_security.po       | 324 +++++++++++++++++
+ .../pt_PT/LC_MESSAGES/flask_security.po       | 323 +++++++++++++++++
+ .../zh_Hans_CN/LC_MESSAGES/flask_security.po  | 324 +++++++++++++++++
+ flask_security/utils.py                       |  26 +-
+ flask_security/views.py                       |  10 +-
+ 29 files changed, 2196 insertions(+), 124 deletions(-)
+ create mode 100644 flask_security/templates/security/base.html
+ create mode 100644 flask_security/translations/es_ES/LC_MESSAGES/flask_security.po
+ create mode 100644 flask_security/translations/ja_JP/LC_MESSAGES/flask_security.po
+ create mode 100644 flask_security/translations/nl_NL/LC_MESSAGES/flask_security.po
+ create mode 100644 flask_security/translations/pt_BR/LC_MESSAGES/flask_security.po
+ create mode 100644 flask_security/translations/pt_PT/LC_MESSAGES/flask_security.po
+ create mode 100644 flask_security/translations/zh_Hans_CN/LC_MESSAGES/flask_security.po
+
+diff --git a/flask_security/changeable.py b/flask_security/changeable.py
+index 36c56e2..466b979 100644
+--- a/flask_security/changeable.py
++++ b/flask_security/changeable.py
+@@ -14,7 +14,7 @@ from flask import current_app
+ from werkzeug.local import LocalProxy
+ 
+ from .signals import password_changed
+-from .utils import config_value, hash_password, send_mail
++from .utils import config_value, hash_password
+ 
+ # Convenient references
+ _security = LocalProxy(lambda: current_app.extensions['security'])
+@@ -29,7 +29,7 @@ def send_password_changed_notice(user):
+     """
+     if config_value('SEND_PASSWORD_CHANGE_EMAIL'):
+         subject = config_value('EMAIL_SUBJECT_PASSWORD_CHANGE_NOTICE')
+-        send_mail(subject, user.email, 'change_notice', user=user)
++        _security.send_mail(subject, user.email, 'change_notice', user=user)
+ 
+ 
+ def change_user_password(user, password):
+diff --git a/flask_security/cli.py b/flask_security/cli.py
+index f085265..ec2edf3 100644
+--- a/flask_security/cli.py
++++ b/flask_security/cli.py
+@@ -60,7 +60,7 @@ def users_create(identity, password, active):
+     kwargs.update(**{'password': password, 'active': 'y' if active else ''})
+ 
+     form = _security.confirm_register_form(
+-        MultiDict(kwargs), csrf_enabled=False
++        MultiDict(kwargs), meta={'csrf': False}
+     )
+ 
+     if form.validate():
+diff --git a/flask_security/confirmable.py b/flask_security/confirmable.py
+index b72596b..fb84d72 100644
+--- a/flask_security/confirmable.py
++++ b/flask_security/confirmable.py
+@@ -14,7 +14,7 @@ from flask import current_app as app
+ from werkzeug.local import LocalProxy
+ 
+ from .signals import confirm_instructions_sent, user_confirmed
+-from .utils import config_value, get_token_status, hash_data, send_mail, \
++from .utils import config_value, get_token_status, hash_data, \
+     url_for_security, verify_hash
+ 
+ # Convenient references
+@@ -39,9 +39,9 @@ def send_confirmation_instructions(user):
+ 
+     confirmation_link, token = generate_confirmation_link(user)
+ 
+-    send_mail(config_value('EMAIL_SUBJECT_CONFIRM'), user.email,
+-              'confirmation_instructions', user=user,
+-              confirmation_link=confirmation_link)
++    _security.send_mail(config_value('EMAIL_SUBJECT_CONFIRM'), user.email,
++                        'confirmation_instructions', user=user,
++                        confirmation_link=confirmation_link)
+ 
+     confirm_instructions_sent.send(app._get_current_object(), user=user,
+                                    token=token)
+diff --git a/flask_security/core.py b/flask_security/core.py
+index bca2f36..65f9057 100644
+--- a/flask_security/core.py
++++ b/flask_security/core.py
+@@ -16,8 +16,9 @@ from datetime import datetime
+ import pkg_resources
+ from flask import current_app, render_template
+ from flask_babelex import Domain
++from flask_login import AnonymousUserMixin, LoginManager
+ from flask_login import UserMixin as BaseUserMixin
+-from flask_login import AnonymousUserMixin, LoginManager, current_user
++from flask_login import current_user
+ from flask_principal import Identity, Principal, RoleNeed, UserNeed, \
+     identity_loaded
+ from itsdangerous import URLSafeTimedSerializer
+@@ -28,9 +29,10 @@ from werkzeug.local import LocalProxy
+ from .forms import ChangePasswordForm, ConfirmRegisterForm, \
+     ForgotPasswordForm, LoginForm, PasswordlessLoginForm, RegisterForm, \
+     ResetPasswordForm, SendConfirmationForm
++from .utils import _
+ from .utils import config_value as cv
+-from .utils import _, get_config, hash_data, localize_callback, string_types, \
+-    url_for_security, verify_hash
++from .utils import get_config, hash_data, localize_callback, send_mail, \
++    string_types, url_for_security, verify_and_update_password, verify_hash
+ from .views import create_blueprint
+ 
+ # Convenient references
+@@ -46,9 +48,21 @@ _default_config = {
+     'SUBDOMAIN': None,
+     'FLASH_MESSAGES': True,
+     'I18N_DOMAIN': 'flask_security',
++    'I18N_DIRNAME': pkg_resources.resource_filename(
++        'flask_security', 'translations'),
+     'PASSWORD_HASH': 'bcrypt',
+     'PASSWORD_SALT': None,
+-    'PASSWORD_SINGLE_HASH': False,
++    'PASSWORD_SINGLE_HASH': {
++        'django_argon2',
++        'django_bcrypt_sha256',
++        'django_pbkdf2_sha256',
++        'django_pbkdf2_sha1',
++        'django_bcrypt',
++        'django_salted_md5',
++        'django_salted_sha1',
++        'django_des_crypt',
++        'plaintext',
++    },
+     'LOGIN_URL': '/login',
+     'LOGOUT_URL': '/logout',
+     'REGISTER_URL': '/register',
+@@ -131,8 +145,8 @@ _default_messages = {
+     'UNAUTHORIZED': (
+         _('You do not have permission to view this resource.'), 'error'),
+     'CONFIRM_REGISTRATION': (
+-        _('Thank you. Confirmation instructions '
+-          'have been sent to %(email)s.'),
++        _('Instructions to login or reset your password '
++          'have been sent.'),
+         'success'),
+     'EMAIL_CONFIRMED': (
+         _('Thank you. Your email has been confirmed.'), 'success'),
+@@ -149,7 +163,7 @@ _default_messages = {
+     'INVALID_REDIRECT': (
+         _('Redirections outside the domain are forbidden'), 'error'),
+     'PASSWORD_RESET_REQUEST': (
+-        _('Instructions to reset your password have been sent to %(email)s.'),
++        _('Instructions to login or reset your password have been sent.'),
+         'info'),
+     'PASSWORD_RESET_EXPIRED': (
+         _('You did not reset your password within %(within)s. '
+@@ -157,7 +171,7 @@ _default_messages = {
+     'INVALID_RESET_PASSWORD_TOKEN': (
+         _('Invalid reset password token.'), 'error'),
+     'CONFIRMATION_REQUIRED': (
+-        _('Email requires confirmation.'), 'error'),
++        _('Instructions to login or reset your password have been sent.'), 'success'),
+     'CONFIRMATION_REQUEST': (
+         _('Confirmation instructions have been sent to %(email)s.'), 'info'),
+     'CONFIRMATION_EXPIRED': (
+@@ -184,7 +198,7 @@ _default_messages = {
+     'PASSWORD_INVALID_LENGTH': (
+         _('Password must be at least 6 characters'), 'error'),
+     'USER_DOES_NOT_EXIST': (
+-        _('Specified user does not exist'), 'error'),
++        _('Invalid email or password.'), 'error'),
+     'INVALID_PASSWORD': (
+         _('Invalid password'), 'error'),
+     'PASSWORDLESS_LOGIN_SUCCESSFUL': (
+@@ -228,7 +242,8 @@ def _request_loader(request):
+     token = request.args.get(args_key, header_token)
+     if request.is_json:
+         data = request.get_json(silent=True) or {}
+-        token = data.get(args_key, token)
++        if isinstance(data, dict):
++            token = data.get(args_key, token)
+ 
+     try:
+         data = _security.remember_token_serializer.loads(
+@@ -300,7 +315,7 @@ def _get_pwd_context(app):
+ 
+ def _get_i18n_domain(app):
+     return Domain(
+-        pkg_resources.resource_filename('flask_security', 'translations'),
++        dirname=cv('I18N_DIRNAME', app=app),
+         domain=cv('I18N_DOMAIN', app=app)
+     )
+ 
+@@ -326,7 +341,6 @@ def _get_state(app, datastore, anonymous_user=None, **kwargs):
+     kwargs.update(dict(
+         app=app,
+         datastore=datastore,
+-        login_manager=_get_login_manager(app, anonymous_user),
+         principal=_get_principal(app),
+         pwd_context=_get_pwd_context(app),
+         hashing_context=_get_hashing_context(app),
+@@ -340,6 +354,10 @@ def _get_state(app, datastore, anonymous_user=None, **kwargs):
+         _unauthorized_callback=None
+     ))
+ 
++    if 'login_manager' not in kwargs:
++        kwargs['login_manager'] = _get_login_manager(
++            app, anonymous_user)
++
+     for key, value in _default_forms.items():
+         if key not in kwargs or not kwargs[key]:
+             kwargs[key] = value
+@@ -391,6 +409,10 @@ class UserMixin(BaseUserMixin):
+         """Serialize user object as response payload."""
+         return {'id': str(self.id)}
+ 
++    def verify_and_update_password(self, password):
++        """Verify and update user password using configured hash."""
++        return verify_and_update_password(password, self)
++
+ 
+ class AnonymousUser(AnonymousUserMixin):
+     """AnonymousUser definition"""
+@@ -459,30 +481,51 @@ class Security(object):
+ 
+     :param app: The application.
+     :param datastore: An instance of a user datastore.
++    :param register_blueprint: to register the Security blueprint or not.
++    :param login_form: set form for the login view
++    :param register_form: set form for the register view
++    :param confirm_register_form: set form for the confirm register view
++    :param forgot_password_form: set form for the forgot password view
++    :param reset_password_form: set form for the reset password view
++    :param change_password_form: set form for the change password view
++    :param send_confirmation_form: set form for the send confirmation view
++    :param passwordless_login_form: set form for the passwordless login view
++    :param anonymous_user: class to use for anonymous user
+     """
+ 
+-    def __init__(self, app=None, datastore=None, **kwargs):
++    def __init__(self, app=None, datastore=None, register_blueprint=True,
++                 **kwargs):
+         self.app = app
+-        self.datastore = datastore
++        self._datastore = datastore
++        self._register_blueprint = register_blueprint
++        self._kwargs = kwargs
+ 
++        self._state = None  # set by init_app
+         if app is not None and datastore is not None:
+-            self._state = self.init_app(app, datastore, **kwargs)
+-
+-    def init_app(self, app, datastore=None, register_blueprint=True,
+-                 login_form=None, confirm_register_form=None,
+-                 register_form=None, forgot_password_form=None,
+-                 reset_password_form=None, change_password_form=None,
+-                 send_confirmation_form=None, passwordless_login_form=None,
+-                 anonymous_user=None):
++            self._state = self.init_app(
++                app,
++                datastore,
++                register_blueprint=register_blueprint,
++                **kwargs)
++
++    def init_app(self, app, datastore=None, register_blueprint=None, **kwargs):
+         """Initializes the Flask-Security extension for the specified
+-        application and datastore implentation.
++        application and datastore implementation.
+ 
+         :param app: The application.
+         :param datastore: An instance of a user datastore.
+         :param register_blueprint: to register the Security blueprint or not.
+         """
+         self.app = app
+-        self.datastore = datastore
++
++        if datastore is None:
++            datastore = self._datastore
++
++        if register_blueprint is None:
++            register_blueprint = self._register_blueprint
++
++        for key, value in self._kwargs.items():
++            kwargs.setdefault(key, value)
+ 
+         for key, value in _default_config.items():
+             app.config.setdefault('SECURITY_' + key, value)
+@@ -492,16 +535,7 @@ class Security(object):
+ 
+         identity_loaded.connect_via(app)(_on_identity_loaded)
+ 
+-        state = _get_state(app, self.datastore,
+-                           login_form=login_form,
+-                           confirm_register_form=confirm_register_form,
+-                           register_form=register_form,
+-                           forgot_password_form=forgot_password_form,
+-                           reset_password_form=reset_password_form,
+-                           change_password_form=change_password_form,
+-                           send_confirmation_form=send_confirmation_form,
+-                           passwordless_login_form=passwordless_login_form,
+-                           anonymous_user=anonymous_user)
++        self._state = state = _get_state(app, datastore, **kwargs)
+ 
+         if register_blueprint:
+             app.register_blueprint(create_blueprint(state, __name__))
+@@ -513,6 +547,7 @@ class Security(object):
+                 app.jinja_env.globals['_'] = state.i18n_domain.gettext
+ 
+         state.render_template = self.render_template
++        state.send_mail = self.send_mail
+         app.extensions['security'] = state
+ 
+         if hasattr(app, 'cli'):
+@@ -527,5 +562,8 @@ class Security(object):
+     def render_template(self, *args, **kwargs):
+         return render_template(*args, **kwargs)
+ 
++    def send_mail(self, *args, **kwargs):
++        return send_mail(*args, **kwargs)
++
+     def __getattr__(self, name):
+         return getattr(self._state, name, None)
+diff --git a/flask_security/datastore.py b/flask_security/datastore.py
+index b689c07..c8109eb 100644
+--- a/flask_security/datastore.py
++++ b/flask_security/datastore.py
+@@ -234,12 +234,17 @@ class SQLAlchemyUserDatastore(SQLAlchemyDatastore, UserDatastore):
+ 
+     def get_user(self, identifier):
+         from sqlalchemy import func as alchemyFn
++        user_model_query = self.user_model.query
++        if hasattr(self.user_model, 'roles'):
++            from sqlalchemy.orm import joinedload
++            user_model_query = user_model_query.options(joinedload('roles'))
++
+         if self._is_numeric(identifier):
+-            return self.user_model.query.get(identifier)
++            return user_model_query.get(identifier)
+         for attr in get_identity_attributes():
+             query = alchemyFn.lower(getattr(self.user_model, attr)) \
+                 == alchemyFn.lower(identifier)
+-            rv = self.user_model.query.filter(query).first()
++            rv = user_model_query.filter(query).first()
+             if rv is not None:
+                 return rv
+ 
+@@ -251,7 +256,12 @@ class SQLAlchemyUserDatastore(SQLAlchemyDatastore, UserDatastore):
+         return True
+ 
+     def find_user(self, **kwargs):
+-        return self.user_model.query.filter_by(**kwargs).first()
++        query = self.user_model.query
++        if hasattr(self.user_model, 'roles'):
++            from sqlalchemy.orm import joinedload
++            query = query.options(joinedload('roles'))
++
++        return query.filter_by(**kwargs).first()
+ 
+     def find_role(self, role):
+         return self.role_model.query.filter_by(name=role).first()
+diff --git a/flask_security/decorators.py b/flask_security/decorators.py
+index 8ff34dd..8eecacd 100644
+--- a/flask_security/decorators.py
++++ b/flask_security/decorators.py
+@@ -53,7 +53,12 @@ def _get_unauthorized_view():
+             except BuildError:
+                 view = None
+         utils.do_flash(*utils.get_message('UNAUTHORIZED'))
+-        return redirect(view or request.referrer or '/')
++        redirect_to = '/'
++        if (request.referrer and
++                not request.referrer.split('?')[0].endswith(request.path)):
++            redirect_to = request.referrer
++
++        return redirect(view or redirect_to)
+     abort(403)
+ 
+ 
+@@ -71,9 +76,11 @@ def _check_token():
+ 
+ def _check_http_auth():
+     auth = request.authorization or BasicAuth(username=None, password=None)
+-    user = _security.datastore.find_user(email=auth.username)
++    if not auth.username:
++        return False
++    user = _security.datastore.get_user(auth.username)
+ 
+-    if user and utils.verify_and_update_password(auth.password, user):
++    if user and user.verify_and_update_password(auth.password):
+         _security.datastore.commit()
+         app = current_app._get_current_object()
+         _request_ctx_stack.top.user = user
+@@ -85,7 +92,6 @@ def _check_http_auth():
+ 
+ def http_auth_required(realm):
+     """Decorator that protects endpoints using Basic HTTP authentication.
+-    The username should be set to the user's email address.
+ 
+     :param realm: optional realm name"""
+ 
+diff --git a/flask_security/forms.py b/flask_security/forms.py
+index 903b363..2e2755d 100644
+--- a/flask_security/forms.py
++++ b/flask_security/forms.py
+@@ -20,9 +20,8 @@ from wtforms import BooleanField, Field, HiddenField, PasswordField, \
+     StringField, SubmitField, ValidationError, validators
+ 
+ from .confirmable import requires_confirmation
+-from .utils import _, _datastore, config_value, get_message, \
+-    localize_callback, url_for_security, validate_redirect_url, \
+-    verify_and_update_password
++from .utils import _, _datastore, config_value, get_message, hash_password, \
++    localize_callback, url_for_security, validate_redirect_url
+ 
+ lazy_gettext = make_lazy_gettext(lambda: localize_callback)
+ 
+@@ -84,7 +83,7 @@ def unique_user_email(form, field):
+ def valid_user_email(form, field):
+     form.user = _datastore.get_user(field.data)
+     if form.user is None:
+-        raise ValidationError(get_message('USER_DOES_NOT_EXIST')[0])
++        raise ValidationError(get_message('CONFIRMATION_REQUIRED')[0])
+ 
+ 
+ class Form(BaseForm):
+@@ -154,7 +153,7 @@ class RegisterFormMixin():
+ 
+ 
+ class SendConfirmationForm(Form, UserEmailFormMixin):
+-    """The default forgot password form"""
++    """The default send confirmation form"""
+ 
+     submit = SubmitField(get_form_field_label('send_confirmation'))
+ 
+@@ -234,11 +233,15 @@ class LoginForm(Form, NextFormMixin):
+ 
+         if self.user is None:
+             self.email.errors.append(get_message('USER_DOES_NOT_EXIST')[0])
++            # Reduce timing variation between existing and non-existung users
++            hash_password(self.password.data)
+             return False
+         if not self.user.password:
+             self.password.errors.append(get_message('PASSWORD_NOT_SET')[0])
++            # Reduce timing variation between existing and non-existung users
++            hash_password(self.password.data)
+             return False
+-        if not verify_and_update_password(self.password.data, self.user):
++        if not self.user.verify_and_update_password(self.password.data):
+             self.password.errors.append(get_message('INVALID_PASSWORD')[0])
+             return False
+         if requires_confirmation(self.user):
+@@ -288,7 +291,7 @@ class ChangePasswordForm(Form, PasswordFormMixin):
+         if not super(ChangePasswordForm, self).validate():
+             return False
+ 
+-        if not verify_and_update_password(self.password.data, current_user):
++        if not current_user.verify_and_update_password(self.password.data):
+             self.password.errors.append(get_message('INVALID_PASSWORD')[0])
+             return False
+         if self.password.data == self.new_password.data:
+diff --git a/flask_security/passwordless.py b/flask_security/passwordless.py
+index fef70ad..d9c125a 100644
+--- a/flask_security/passwordless.py
++++ b/flask_security/passwordless.py
+@@ -13,7 +13,7 @@ from flask import current_app as app
+ from werkzeug.local import LocalProxy
+ 
+ from .signals import login_instructions_sent
+-from .utils import config_value, get_token_status, send_mail, url_for_security
++from .utils import config_value, get_token_status, url_for_security
+ 
+ # Convenient references
+ _security = LocalProxy(lambda: app.extensions['security'])
+@@ -30,8 +30,8 @@ def send_login_instructions(user):
+     token = generate_login_token(user)
+     login_link = url_for_security('token_login', token=token, _external=True)
+ 
+-    send_mail(config_value('EMAIL_SUBJECT_PASSWORDLESS'), user.email,
+-              'login_instructions', user=user, login_link=login_link)
++    _security.send_mail(config_value('EMAIL_SUBJECT_PASSWORDLESS'), user.email,
++                        'login_instructions', user=user, login_link=login_link)
+ 
+     login_instructions_sent.send(app._get_current_object(), user=user,
+                                  login_token=token)
+diff --git a/flask_security/recoverable.py b/flask_security/recoverable.py
+index fa4c381..f783ca2 100644
+--- a/flask_security/recoverable.py
++++ b/flask_security/recoverable.py
+@@ -14,7 +14,7 @@ from werkzeug.local import LocalProxy
+ 
+ from .signals import password_reset, reset_password_instructions_sent
+ from .utils import config_value, get_token_status, hash_data, hash_password, \
+-    send_mail, url_for_security, verify_hash
++    url_for_security, verify_hash
+ 
+ # Convenient references
+ _security = LocalProxy(lambda: app.extensions['security'])
+@@ -33,9 +33,9 @@ def send_reset_password_instructions(user):
+     )
+ 
+     if config_value('SEND_PASSWORD_RESET_EMAIL'):
+-        send_mail(config_value('EMAIL_SUBJECT_PASSWORD_RESET'), user.email,
+-                  'reset_instructions',
+-                  user=user, reset_link=reset_link)
++        _security.send_mail(config_value('EMAIL_SUBJECT_PASSWORD_RESET'),
++                            user.email, 'reset_instructions',
++                            user=user, reset_link=reset_link)
+ 
+     reset_password_instructions_sent.send(
+         app._get_current_object(), user=user, token=token
+@@ -48,8 +48,8 @@ def send_password_reset_notice(user):
+     :param user: The user to send the notice to
+     """
+     if config_value('SEND_PASSWORD_RESET_NOTICE_EMAIL'):
+-        send_mail(config_value('EMAIL_SUBJECT_PASSWORD_NOTICE'), user.email,
+-                  'reset_notice', user=user)
++        _security.send_mail(config_value('EMAIL_SUBJECT_PASSWORD_NOTICE'),
++                            user.email, 'reset_notice', user=user)
+ 
+ 
+ def generate_reset_password_token(user):
+@@ -73,7 +73,7 @@ def reset_password_token_status(token):
+     expired, invalid, user, data = get_token_status(
+         token, 'reset', 'RESET_PASSWORD', return_data=True
+     )
+-    if not invalid:
++    if not invalid and user:
+         if user.password:
+             if not verify_hash(data[1], user.password):
+                 invalid = True
+diff --git a/flask_security/registerable.py b/flask_security/registerable.py
+index 2ce6de9..a23c641 100644
+--- a/flask_security/registerable.py
++++ b/flask_security/registerable.py
+@@ -14,8 +14,7 @@ from werkzeug.local import LocalProxy
+ 
+ from .confirmable import generate_confirmation_link
+ from .signals import user_registered
+-from .utils import config_value, do_flash, get_message, hash_password, \
+-    send_mail
++from .utils import config_value, do_flash, get_message, hash_password
+ 
+ # Convenient references
+ _security = LocalProxy(lambda: app.extensions['security'])
+@@ -37,7 +36,8 @@ def register_user(**kwargs):
+                          user=user, confirm_token=token)
+ 
+     if config_value('SEND_REGISTER_EMAIL'):
+-        send_mail(config_value('EMAIL_SUBJECT_REGISTER'), user.email,
+-                  'welcome', user=user, confirmation_link=confirmation_link)
++        _security.send_mail(config_value('EMAIL_SUBJECT_REGISTER'), user.email,
++                            'welcome', user=user,
++                            confirmation_link=confirmation_link)
+ 
+     return user
+diff --git a/flask_security/script.py b/flask_security/script.py
+index 9c2b247..b0e7523 100644
+--- a/flask_security/script.py
++++ b/flask_security/script.py
+@@ -62,7 +62,7 @@ class CreateUserCommand(Command):
+         from flask_security.forms import ConfirmRegisterForm
+         from werkzeug.datastructures import MultiDict
+ 
+-        form = ConfirmRegisterForm(MultiDict(kwargs), csrf_enabled=False)
++        form = ConfirmRegisterForm(MultiDict(kwargs), meta={'csrf': False})
+ 
+         if form.validate():
+             kwargs['password'] = hash_password(kwargs['password'])
+diff --git a/flask_security/templates/security/base.html b/flask_security/templates/security/base.html
+new file mode 100644
+index 0000000..da792e7
+--- /dev/null
++++ b/flask_security/templates/security/base.html
+@@ -0,0 +1,30 @@
++{% block doc -%}
++<!DOCTYPE html>
++<html{% block html_attribs %}{% endblock html_attribs %}>
++  {%- block html %}
++  <head>
++    {%- block head %}
++    <title>{% block title %}{{ title|default }}{% endblock title %}</title>
++
++      {%- block metas %}
++      <meta name="viewport" content="width=device-width, initial-scale=1.0">
++      {%- endblock metas %}
++
++      {%- block styles %}
++      {%- endblock styles %}
++    {%- endblock head %}
++  </head>
++  <body{% block body_attribs %}{% endblock body_attribs %}>
++    {% block body -%}
++      {% block navbar %}
++      {%- endblock navbar %}
++      {% block content -%}
++      {%- endblock content %}
++
++      {% block scripts %}
++      {%- endblock scripts %}
++    {%- endblock body %}
++  </body>
++  {%- endblock html %}
++</html>
++{% endblock doc -%}
+diff --git a/flask_security/templates/security/change_password.html b/flask_security/templates/security/change_password.html
+index f1a9ccc..0c08d16 100644
+--- a/flask_security/templates/security/change_password.html
++++ b/flask_security/templates/security/change_password.html
+@@ -1,4 +1,7 @@
++{% extends "security/base.html" %}
+ {% from "security/_macros.html" import render_field_with_errors, render_field %}
++
++{% block content %}
+ {% include "security/_messages.html" %}
+ <h1>{{ _('Change password') }}</h1>
+ <form action="{{ url_for_security('change_password') }}" method="POST" name="change_password_form">
+@@ -8,4 +11,4 @@
+   {{ render_field_with_errors(change_password_form.new_password_confirm) }}
+   {{ render_field(change_password_form.submit) }}
+ </form>
+-
++{% endblock %}
+diff --git a/flask_security/templates/security/forgot_password.html b/flask_security/templates/security/forgot_password.html
+index ce5fd5d..22391db 100644
+--- a/flask_security/templates/security/forgot_password.html
++++ b/flask_security/templates/security/forgot_password.html
+@@ -1,4 +1,7 @@
++{% extends "security/base.html" %}
+ {% from "security/_macros.html" import render_field_with_errors, render_field %}
++
++{% block content %}
+ {% include "security/_messages.html" %}
+ <h1>{{ _('Send password reset instructions') }}</h1>
+ <form action="{{ url_for_security('forgot_password') }}" method="POST" name="forgot_password_form">
+@@ -7,3 +10,4 @@
+   {{ render_field(forgot_password_form.submit) }}
+ </form>
+ {% include "security/_menu.html" %}
++{% endblock %}
+diff --git a/flask_security/templates/security/login_user.html b/flask_security/templates/security/login_user.html
+index 0962d2f..d9b46e9 100644
+--- a/flask_security/templates/security/login_user.html
++++ b/flask_security/templates/security/login_user.html
+@@ -1,4 +1,7 @@
++{% extends "security/base.html" %}
+ {% from "security/_macros.html" import render_field_with_errors, render_field %}
++
++{% block content %}
+ {% include "security/_messages.html" %}
+ <h1>{{ _('Login') }}</h1>
+ <form action="{{ url_for_security('login') }}" method="POST" name="login_user_form">
+@@ -6,7 +9,7 @@
+   {{ render_field_with_errors(login_user_form.email) }}
+   {{ render_field_with_errors(login_user_form.password) }}
+   {{ render_field_with_errors(login_user_form.remember) }}
+-  {{ render_field(login_user_form.next) }}
+   {{ render_field(login_user_form.submit) }}
+ </form>
+ {% include "security/_menu.html" %}
++{% endblock %}
+diff --git a/flask_security/templates/security/register_user.html b/flask_security/templates/security/register_user.html
+index 0380c74..abad512 100644
+--- a/flask_security/templates/security/register_user.html
++++ b/flask_security/templates/security/register_user.html
+@@ -1,4 +1,7 @@
++{% extends "security/base.html" %}
+ {% from "security/_macros.html" import render_field_with_errors, render_field %}
++
++{% block content %}
+ {% include "security/_messages.html" %}
+ <h1>{{ _('Register') }}</h1>
+ <form action="{{ url_for_security('register') }}" method="POST" name="register_user_form">
+@@ -11,3 +14,4 @@
+   {{ render_field(register_user_form.submit) }}
+ </form>
+ {% include "security/_menu.html" %}
++{% endblock %}
+diff --git a/flask_security/templates/security/reset_password.html b/flask_security/templates/security/reset_password.html
+index ee1166c..18cf6f9 100644
+--- a/flask_security/templates/security/reset_password.html
++++ b/flask_security/templates/security/reset_password.html
+@@ -1,4 +1,7 @@
++{% extends "security/base.html" %}
+ {% from "security/_macros.html" import render_field_with_errors, render_field %}
++
++{% block content %}
+ {% include "security/_messages.html" %}
+ <h1>{{ _('Reset password') }}</h1>
+ <form action="{{ url_for_security('reset_password', token=reset_password_token) }}" method="POST" name="reset_password_form">
+@@ -8,3 +11,4 @@
+   {{ render_field(reset_password_form.submit) }}
+ </form>
+ {% include "security/_menu.html" %}
++{% endblock %}
+diff --git a/flask_security/templates/security/send_confirmation.html b/flask_security/templates/security/send_confirmation.html
+index 473b983..730c8b8 100644
+--- a/flask_security/templates/security/send_confirmation.html
++++ b/flask_security/templates/security/send_confirmation.html
+@@ -1,4 +1,7 @@
++{% extends "security/base.html" %}
+ {% from "security/_macros.html" import render_field_with_errors, render_field %}
++
++{% block content %}
+ {% include "security/_messages.html" %}
+ <h1>{{ _('Resend confirmation instructions') }}</h1>
+ <form action="{{ url_for_security('send_confirmation') }}" method="POST" name="send_confirmation_form">
+@@ -7,3 +10,4 @@
+   {{ render_field(send_confirmation_form.submit) }}
+ </form>
+ {% include "security/_menu.html" %}
++{% endblock %}
+diff --git a/flask_security/templates/security/send_login.html b/flask_security/templates/security/send_login.html
+index df6f089..cb628fc 100644
+--- a/flask_security/templates/security/send_login.html
++++ b/flask_security/templates/security/send_login.html
+@@ -1,4 +1,7 @@
++{% extends "security/base.html" %}
+ {% from "security/_macros.html" import render_field_with_errors, render_field %}
++
++{% block content %}
+ {% include "security/_messages.html" %}
+ <h1>{{ _('Login') }}</h1>
+ <form action="{{ url_for_security('login') }}" method="POST" name="send_login_form">
+@@ -7,3 +10,4 @@
+   {{ render_field(send_login_form.submit) }}
+ </form>
+ {% include "security/_menu.html" %}
++{% endblock %}
+diff --git a/flask_security/translations/de_DE/LC_MESSAGES/flask_security.po b/flask_security/translations/de_DE/LC_MESSAGES/flask_security.po
+index 27e66e5..80a8dd4 100644
+--- a/flask_security/translations/de_DE/LC_MESSAGES/flask_security.po
++++ b/flask_security/translations/de_DE/LC_MESSAGES/flask_security.po
+@@ -3,15 +3,16 @@
+ # Copyright (C) 2017 ORGANIZATION
+ # This file is distributed under the same license as the Flask-Security
+ # project.
+-# Ingo Kleiber <ingo@kleiber.me>, 2017.
++# Ingo Kleiber <ingo@kleiber.me>, 2017,
++# Erich Seifert <dev@erichseifert.de>, 2017.
+ #
+ msgid ""
+ msgstr ""
+ "Project-Id-Version: Flask-Security 2.0.1\n"
+ "Report-Msgid-Bugs-To: info@inveniosoftware.org\n"
+ "POT-Creation-Date: 2017-06-06 13:23+0200\n"
+-"PO-Revision-Date: 2017-04-30 17:00+0200\n"
+-"Last-Translator: Ingo Kleiber <ingo@kleiber.me>\n"
++"PO-Revision-Date: 2017-09-25 09:14+0200\n"
++"Last-Translator: Erich Seifert <dev@erichseifert.de>\n"
+ "Language: de_DE\n"
+ "Language-Team: de_DE <LL@li.org>\n"
+ "Plural-Forms: nplurals=2; plural=(n != 1)\n"
+@@ -22,7 +23,7 @@ msgstr ""
+ 
+ #: flask_security/core.py:99
+ msgid "Login Required"
+-msgstr "Login erforderlich"
++msgstr "Anmeldung erforderlich"
+ 
+ #: flask_security/core.py:100
+ msgid "Welcome"
+@@ -30,11 +31,11 @@ msgstr "Willkommen"
+ 
+ #: flask_security/core.py:101
+ msgid "Please confirm your email"
+-msgstr "Bitte E-Mail Adresse bestätigen"
++msgstr "Bitte E-Mail-Adresse bestätigen"
+ 
+ #: flask_security/core.py:102
+ msgid "Login instructions"
+-msgstr "Anmeldeinstruktionen"
++msgstr "Anmeldeanleitung"
+ 
+ #: flask_security/core.py:103
+ #: flask_security/templates/security/email/reset_notice.html:1
+@@ -56,15 +57,15 @@ msgstr "Keine Berechtigung um diese Ressource zu sehen."
+ #: flask_security/core.py:134
+ #, python-format
+ msgid "Thank you. Confirmation instructions have been sent to %(email)s."
+-msgstr "Vielen Dank. Bestätigungsinstruktionen wurden an %(email)s gesendet."
++msgstr "Vielen Dank. Bestätigungsanleitung wurde an %(email)s gesendet."
+ 
+ #: flask_security/core.py:138
+ msgid "Thank you. Your email has been confirmed."
+-msgstr "Vielen Dank. Die E-Mail Adresse wurde bestätigt."
++msgstr "Vielen Dank. Die E-Mail-Adresse wurde bestätigt."
+ 
+ #: flask_security/core.py:140
+ msgid "Your email has already been confirmed."
+-msgstr "Die E-Mail Adresse wurde bereits bestätigt."
++msgstr "Die E-Mail-Adresse wurde bereits bestätigt."
+ 
+ #: flask_security/core.py:142
+ msgid "Invalid confirmation token."
+@@ -91,7 +92,7 @@ msgstr "Weiterleitungen außerhalb der Domain sind verboten"
+ #, python-format
+ msgid "Instructions to reset your password have been sent to %(email)s."
+ msgstr ""
+-"Instruktionen um das Passwort wiederherzustellen wurden an %(email)s "
++"Eine Anleitung, um das Passwort wiederherzustellen wurde an %(email)s "
+ "gesendet."
+ 
+ #: flask_security/core.py:155
+@@ -100,8 +101,8 @@ msgid ""
+ "You did not reset your password within %(within)s. New instructions have "
+ "been sent to %(email)s."
+ msgstr ""
+-"Das Passwort wurde nicht innerhalb von %(within)s zurückgesetzt. Neue "
+-"Instruktionen wurden an %(email)s gesendet."
++"Das Passwort wurde nicht innerhalb von %(within)s zurückgesetzt. Eine neue "
++"Anleitung wurde an %(email)s gesendet."
+ 
+ #: flask_security/core.py:158
+ msgid "Invalid reset password token."
+@@ -109,12 +110,12 @@ msgstr "Ungültiger Passwortwiederherstellungscode."
+ 
+ #: flask_security/core.py:160
+ msgid "Email requires confirmation."
+-msgstr "Die E-Mail Adresse muss bestätigt werden."
++msgstr "Die E-Mail-Adresse muss bestätigt werden."
+ 
+ #: flask_security/core.py:162
+ #, python-format
+ msgid "Confirmation instructions have been sent to %(email)s."
+-msgstr "Bestätigungsinstruktionen wurden an %(email)s gesendet."
++msgstr "Bestätigungsanleitung wurde an %(email)s gesendet."
+ 
+ #: flask_security/core.py:164
+ #, python-format
+@@ -122,7 +123,7 @@ msgid ""
+ "You did not confirm your email within %(within)s. New instructions to "
+ "confirm your email have been sent to %(email)s."
+ msgstr ""
+-"Die E-Mail Adresse wurden nicht innerhalb von %(within)s bestätigt. Neue "
++"Die E-Mail-Adresse wurden nicht innerhalb von %(within)s bestätigt. Neue "
+ "Instruktionen wurden an %(email)s gesendet."
+ 
+ #: flask_security/core.py:168
+@@ -131,13 +132,13 @@ msgid ""
+ "You did not login within %(within)s. New instructions to login have been "
+ "sent to %(email)s."
+ msgstr ""
+-"Die Anmeldung erfolgte nicht in %(within)s. Neue Instruktionen wurden an "
++"Die Anmeldung erfolgte nicht in %(within)s. Eine neue Anleitung wurde an "
+ "%(email)s gesendet."
+ 
+ #: flask_security/core.py:171
+ #, python-format
+ msgid "Instructions to login have been sent to %(email)s."
+-msgstr "Instruktionen zur Anmeldung wurden an %(email)s gesendet."
++msgstr "Eine Anleitung zur Anmeldung wurde an %(email)s gesendet."
+ 
+ #: flask_security/core.py:173
+ msgid "Invalid login token."
+@@ -149,11 +150,11 @@ msgstr "Konto ist deaktiviert."
+ 
+ #: flask_security/core.py:177
+ msgid "Email not provided"
+-msgstr "Keine E-Mail Adresse angegeben"
++msgstr "Keine E-Mail-Adresse angegeben"
+ 
+ #: flask_security/core.py:179
+ msgid "Invalid email address"
+-msgstr "Ungültige E-Mail Adresse"
++msgstr "Ungültige E-Mail-Adresse"
+ 
+ #: flask_security/core.py:181
+ msgid "Password not provided"
+@@ -169,7 +170,7 @@ msgstr "Das Passwort muss mindestens 6 Zeichen lang sein"
+ 
+ #: flask_security/core.py:187
+ msgid "Specified user does not exist"
+-msgstr "Spezifizierter Benutzer existiert nicht"
++msgstr "Angegebener Benutzer existiert nicht"
+ 
+ #: flask_security/core.py:189
+ msgid "Invalid password"
+@@ -188,8 +189,8 @@ msgid ""
+ "You successfully reset your password and you have been logged in "
+ "automatically."
+ msgstr ""
+-"Das Passwort wurde erfolgreich wiederhergestellt und der Login erfolgte "
+-"automatisch."
++"Das Passwort wurde erfolgreich wiederhergestellt und die Anmeldung "
++"erfolgte automatisch."
+ 
+ #: flask_security/core.py:198
+ msgid "Your new password must be different than your previous password."
+@@ -201,15 +202,15 @@ msgstr "Das Passwort wurde erfolgreich geändert."
+ 
+ #: flask_security/core.py:203
+ msgid "Please log in to access this page."
+-msgstr "Bitte Anmelden um diese Seite zu sehen."
++msgstr "Bitte anmelden, um diese Seite zu sehen."
+ 
+ #: flask_security/core.py:205
+ msgid "Please reauthenticate to access this page."
+-msgstr "Bitte neu authentifizieren um auf diese Seite zuzugreifen."
++msgstr "Bitte neu authentifizieren, um auf diese Seite zuzugreifen."
+ 
+ #: flask_security/forms.py:30
+ msgid "Email Address"
+-msgstr "E-Mail Adresse"
++msgstr "E-Mail-Adresse"
+ 
+ #: flask_security/forms.py:31
+ msgid "Password"
+@@ -232,7 +233,7 @@ msgstr "Registrieren"
+ 
+ #: flask_security/forms.py:35
+ msgid "Resend Confirmation Instructions"
+-msgstr "Bestätigungsinstruktionen neu senden"
++msgstr "Bestätigungsanleitung neu senden"
+ 
+ #: flask_security/forms.py:36
+ msgid "Recover Password"
+@@ -256,7 +257,7 @@ msgstr "Passwort ändern"
+ 
+ #: flask_security/forms.py:41
+ msgid "Send Login Link"
+-msgstr "Login-Link versenden"
++msgstr "Anmelde-Link versenden"
+ 
+ #: flask_security/templates/security/_menu.html:2
+ msgid "Menu"
+@@ -276,7 +277,7 @@ msgstr "Passwort ändern"
+ 
+ #: flask_security/templates/security/forgot_password.html:3
+ msgid "Send password reset instructions"
+-msgstr "Senden von Instruktionen zur Passwortzurücksetzung"
++msgstr "Anleitung zur Passwortzurücksetzung versenden"
+ 
+ #: flask_security/templates/security/reset_password.html:3
+ msgid "Reset password"
+@@ -284,7 +285,7 @@ msgstr "Passwort zurücksetzen"
+ 
+ #: flask_security/templates/security/send_confirmation.html:3
+ msgid "Resend confirmation instructions"
+-msgstr "Bestätigungsinstruktionen erneut versenden"
++msgstr "Bestätigungsanleitung erneut versenden"
+ 
+ #: flask_security/templates/security/email/change_notice.html:1
+ msgid "Your password has been changed."
+@@ -296,16 +297,16 @@ msgstr "Falls das Passwort nicht geändert wurde"
+ 
+ #: flask_security/templates/security/email/change_notice.html:3
+ msgid "click here to reset it"
+-msgstr "hier klicken um es zurückzusetzen"
++msgstr "hier klicken, um es zurückzusetzen"
+ 
+ #: flask_security/templates/security/email/confirmation_instructions.html:1
+ msgid "Please confirm your email through the link below:"
+-msgstr "Bitte die E-Mail Adresse durch den Link unten bestätigen:"
++msgstr "Bitte die E-Mail-Adresse durch den Link unten bestätigen:"
+ 
+ #: flask_security/templates/security/email/confirmation_instructions.html:3
+ #: flask_security/templates/security/email/welcome.html:6
+ msgid "Confirm my account"
+-msgstr "Den Account bestätigen"
++msgstr "Das Konto bestätigen"
+ 
+ #: flask_security/templates/security/email/login_instructions.html:1
+ #: flask_security/templates/security/email/welcome.html:1
+@@ -323,9 +324,9 @@ msgstr "Jetzt anmelden"
+ 
+ #: flask_security/templates/security/email/reset_instructions.html:1
+ msgid "Click here to reset your password"
+-msgstr "Hier klicken um das Passwort zurückzusetzen"
++msgstr "Hier klicken, um das Passwort zurückzusetzen"
+ 
+ #: flask_security/templates/security/email/welcome.html:4
+ msgid "You can confirm your email through the link below:"
+-msgstr "Die E-Mail Adresse kann über den Link unten bestätigt werden"
++msgstr "Die E-Mail-Adresse kann über den Link unten bestätigt werden"
+ 
+diff --git a/flask_security/translations/es_ES/LC_MESSAGES/flask_security.po b/flask_security/translations/es_ES/LC_MESSAGES/flask_security.po
+new file mode 100644
+index 0000000..ac93bc1
+--- /dev/null
++++ b/flask_security/translations/es_ES/LC_MESSAGES/flask_security.po
+@@ -0,0 +1,328 @@
++# Translations template for Flask-Security.
++# Copyright (C) 2017 DINSIC
++# This file is distributed under the same license as the Flask-Security
++# project.
++# Mauko Quiroga <mauko.quiroga@data.gouv.fr>, 2017.
++#
++msgid ""
++msgstr ""
++"Project-Id-Version: Flask-Security 2.0.1\n"
++"Report-Msgid-Bugs-To: info@inveniosoftware.org\n"
++"POT-Creation-Date: 2017-06-06 13:23+0200\n"
++"PO-Revision-Date: 2017-08-25 17:21+0200\n"
++"Language-Team: \n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=UTF-8\n"
++"Content-Transfer-Encoding: 8bit\n"
++"Generated-By: Babel 2.4.0\n"
++"X-Generator: Poedit 2.0.3\n"
++"Last-Translator: Mauko Quiroga <mauko.quiroga@data.gouv.fr>\n"
++"Plural-Forms: nplurals=2; plural=(n != 1);\n"
++"Language: es_ES\n"
++
++#: flask_security/core.py:99
++msgid "Login Required"
++msgstr "Inicio de sesión necesario"
++
++#: flask_security/core.py:100
++msgid "Welcome"
++msgstr "Bienvenido"
++
++#: flask_security/core.py:101
++msgid "Please confirm your email"
++msgstr "Por favor, confirma tu correo electrónico"
++
++#: flask_security/core.py:102
++msgid "Login instructions"
++msgstr "Instrucciones para iniciar sesión"
++
++#: flask_security/core.py:103
++#: flask_security/templates/security/email/reset_notice.html:1
++msgid "Your password has been reset"
++msgstr "Tu contraseña ha sido restablecida"
++
++#: flask_security/core.py:104
++msgid "Your password has been changed"
++msgstr "Tu contraseña ha sido cambiada"
++
++#: flask_security/core.py:106
++msgid "Password reset instructions"
++msgstr "Instrucciones de recuperación de contraseña"
++
++#: flask_security/core.py:132
++msgid "You do not have permission to view this resource."
++msgstr "No tienes permiso para consultar este recurso."
++
++#: flask_security/core.py:134
++#, python-format
++msgid "Thank you. Confirmation instructions have been sent to %(email)s."
++msgstr "Gracias. Un correo con instrucciones sobre cómo confirmar tu cuenta ha sido enviado a %(email)s."
++
++#: flask_security/core.py:138
++msgid "Thank you. Your email has been confirmed."
++msgstr "Gracias. Tu correo electrónico ha sido confirmado."
++
++#: flask_security/core.py:140
++msgid "Your email has already been confirmed."
++msgstr "Tu correo electrónico ya ha sido confirmado."
++
++#: flask_security/core.py:142
++msgid "Invalid confirmation token."
++msgstr "Autentificador de confirmación inválido."
++
++#: flask_security/core.py:144
++#, python-format
++msgid "%(email)s is already associated with an account."
++msgstr "%(email)s ya está asociado a una cuenta."
++
++#: flask_security/core.py:146
++msgid "Password does not match"
++msgstr "La contraseña no coincide"
++
++#: flask_security/core.py:148
++msgid "Passwords do not match"
++msgstr "Las contraseñas no coinciden"
++
++#: flask_security/core.py:150
++msgid "Redirections outside the domain are forbidden"
++msgstr "Las redirecciones a sitios web externos están prohibidas"
++
++#: flask_security/core.py:152
++#, python-format
++msgid "Instructions to reset your password have been sent to %(email)s."
++msgstr "Las instrucciones para restablecer tu contraseña han sido enviadas a %(email)s."
++
++#: flask_security/core.py:155
++#, python-format
++msgid ""
++"You did not reset your password within %(within)s. New instructions have "
++"been sent to %(email)s."
++msgstr ""
++"No restableciste tu contraseña antes de %(within)s. Nuevas instrucciones han "
++"sido enviadas a %(email)s."
++
++#: flask_security/core.py:158
++msgid "Invalid reset password token."
++msgstr "Autentificador de restablecimiento de contraseña inválido."
++
++#: flask_security/core.py:160
++msgid "Email requires confirmation."
++msgstr "El correo electrónico requiere confirmación."
++
++#: flask_security/core.py:162
++#, python-format
++msgid "Confirmation instructions have been sent to %(email)s."
++msgstr "Las instrucciones de confirmación se han enviado a %(email)s."
++
++#: flask_security/core.py:164
++#, python-format
++msgid ""
++"You did not confirm your email within %(within)s. New instructions to "
++"confirm your email have been sent to %(email)s."
++msgstr ""
++"No confirmaste tu correo electrónico antes de %(within)s. Nuevas instrucciones para "
++"confirmar tu correo electrónico han sido enviadas a %(email)s."
++
++#: flask_security/core.py:168
++#, python-format
++msgid ""
++"You did not login within %(within)s. New instructions to login have been "
++"sent to %(email)s."
++msgstr ""
++"No iniciaste sesión antes de %(within)s. Nuevas instrucciones para iniciar sesión han sido "
++"enviadas a %(email)s."
++
++#: flask_security/core.py:171
++#, python-format
++msgid "Instructions to login have been sent to %(email)s."
++msgstr "Instrucciones para iniciar sesión han sido enviadas a %(email)s."
++
++#: flask_security/core.py:173
++msgid "Invalid login token."
++msgstr "Autenticador de inicio de sesión inválido."
++
++#: flask_security/core.py:175
++msgid "Account is disabled."
++msgstr "Cuenta deshabilitada."
++
++#: flask_security/core.py:177
++msgid "Email not provided"
++msgstr "Correo electrónico no indicado"
++
++#: flask_security/core.py:179
++msgid "Invalid email address"
++msgstr "Dirección de correo electrónico inválida"
++
++#: flask_security/core.py:181
++msgid "Password not provided"
++msgstr "Contraseña no indicada"
++
++#: flask_security/core.py:183
++msgid "No password is set for this user"
++msgstr "Ninguna contraseña ha sido definida para este·a usuario·a"
++
++#: flask_security/core.py:185
++msgid "Password must be at least 6 characters"
++msgstr "La contraseña debe contar al menos con 6 caracteres"
++
++#: flask_security/core.py:187
++msgid "Specified user does not exist"
++msgstr "Usuario·a especificado·a no existe"
++
++#: flask_security/core.py:189
++msgid "Invalid password"
++msgstr "Contraseña inválida"
++
++#: flask_security/core.py:191
++msgid "You have successfully logged in."
++msgstr "Has iniciado sesión con éxito."
++
++#: flask_security/core.py:193
++msgid "Forgot password?"
++msgstr "¿Has olvidado tu contraseña?"
++
++#: flask_security/core.py:195
++msgid ""
++"You successfully reset your password and you have been logged in "
++"automatically."
++msgstr ""
++"Has restablecido tu contraseña con éxito y has iniciado sesión "
++"automáticamente."
++
++#: flask_security/core.py:198
++msgid "Your new password must be different than your previous password."
++msgstr "Tu nueva contraseña debe ser diferente de la antigua."
++
++#: flask_security/core.py:201
++msgid "You successfully changed your password."
++msgstr "Has cambiado tu contraseña con éxito."
++
++#: flask_security/core.py:203
++msgid "Please log in to access this page."
++msgstr "Debes iniciar sesión para poder acceder a esta página."
++
++#: flask_security/core.py:205
++msgid "Please reauthenticate to access this page."
++msgstr "Deber iniciar sesión nuevamente para poder acceder a esta página."
++
++#: flask_security/forms.py:30
++msgid "Email Address"
++msgstr "Correo electrónico"
++
++#: flask_security/forms.py:31
++msgid "Password"
++msgstr "Contraseña"
++
++#: flask_security/forms.py:32
++msgid "Remember Me"
++msgstr "Recordarme"
++
++#: flask_security/forms.py:33 flask_security/templates/security/_menu.html:4
++#: flask_security/templates/security/login_user.html:3
++#: flask_security/templates/security/send_login.html:3
++msgid "Login"
++msgstr "Iniciar sesión"
++
++#: flask_security/forms.py:34 flask_security/templates/security/_menu.html:6
++#: flask_security/templates/security/register_user.html:3
++msgid "Register"
++msgstr "Registrarse"
++
++#: flask_security/forms.py:35
++msgid "Resend Confirmation Instructions"
++msgstr "Reenviar instrucciones de confirmación"
++
++#: flask_security/forms.py:36
++msgid "Recover Password"
++msgstr "Recuperar contraseña"
++
++#: flask_security/forms.py:37
++msgid "Reset Password"
++msgstr "Restablecer contraseña"
++
++#: flask_security/forms.py:38
++msgid "Retype Password"
++msgstr "Escribir contraseña nuevamente"
++
++#: flask_security/forms.py:39
++msgid "New Password"
++msgstr "Nueva contraseña"
++
++#: flask_security/forms.py:40
++msgid "Change Password"
++msgstr "Cambiar la contraseña"
++
++#: flask_security/forms.py:41
++msgid "Send Login Link"
++msgstr "Enviar enlace para iniciar sesión"
++
++#: flask_security/templates/security/_menu.html:2
++msgid "Menu"
++msgstr "Menú"
++
++#: flask_security/templates/security/_menu.html:9
++msgid "Forgot password"
++msgstr "Olvidé mi contraseña"
++
++#: flask_security/templates/security/_menu.html:12
++msgid "Confirm account"
++msgstr "Confirmar cuenta"
++
++#: flask_security/templates/security/change_password.html:3
++msgid "Change password"
++msgstr "Cambiar la contraseña"
++
++#: flask_security/templates/security/forgot_password.html:3
++msgid "Send password reset instructions"
++msgstr "Enviar instrucciones para restablecer la contraseña"
++
++#: flask_security/templates/security/reset_password.html:3
++msgid "Reset password"
++msgstr "Restablecer contraseña"
++
++#: flask_security/templates/security/send_confirmation.html:3
++msgid "Resend confirmation instructions"
++msgstr "Reenviar instrucciones de confirmación"
++
++#: flask_security/templates/security/email/change_notice.html:1
++msgid "Your password has been changed."
++msgstr "Tu contraseña ha sido cambiada."
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "If you did not change your password,"
++msgstr "Si no has cambiado tu contraseña,"
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "click here to reset it"
++msgstr "haz clic aquí para restablecerla"
++
++#: flask_security/templates/security/email/confirmation_instructions.html:1
++msgid "Please confirm your email through the link below:"
++msgstr "Confirma tu correo electrónico haciendo clic aquí:"
++
++#: flask_security/templates/security/email/confirmation_instructions.html:3
++#: flask_security/templates/security/email/welcome.html:6
++msgid "Confirm my account"
++msgstr "Confirmar mi cuenta"
++
++#: flask_security/templates/security/email/login_instructions.html:1
++#: flask_security/templates/security/email/welcome.html:1
++#, python-format
++msgid "Welcome %(email)s!"
++msgstr "¡Bienvenido %(email)s!"
++
++#: flask_security/templates/security/email/login_instructions.html:3
++msgid "You can log into your account through the link below:"
++msgstr "Inicia sesión haciendo clic aquí:"
++
++#: flask_security/templates/security/email/login_instructions.html:5
++msgid "Login now"
++msgstr "Iniciar sesión ahora"
++
++#: flask_security/templates/security/email/reset_instructions.html:1
++msgid "Click here to reset your password"
++msgstr "Haz clic aquí para restablecer la contraseña"
++
++#: flask_security/templates/security/email/welcome.html:4
++msgid "You can confirm your email through the link below:"
++msgstr "Confirma tu correo electrónico haciendo clic aquí:"
+diff --git a/flask_security/translations/fr_FR/LC_MESSAGES/flask_security.po b/flask_security/translations/fr_FR/LC_MESSAGES/flask_security.po
+index c80f1ea..0163794 100644
+--- a/flask_security/translations/fr_FR/LC_MESSAGES/flask_security.po
++++ b/flask_security/translations/fr_FR/LC_MESSAGES/flask_security.po
+@@ -187,7 +187,7 @@ msgid ""
+ "You successfully reset your password and you have been logged in "
+ "automatically."
+ msgstr ""
+-"Vous avez bien réinitialisé votre mot de passe et avez été automatiquement"
++"Vous avez bien réinitialisé votre mot de passe et avez été automatiquement "
+ "connecté."
+ 
+ #: flask_security/core.py:198
+diff --git a/flask_security/translations/ja_JP/LC_MESSAGES/flask_security.po b/flask_security/translations/ja_JP/LC_MESSAGES/flask_security.po
+new file mode 100644
+index 0000000..450c1c2
+--- /dev/null
++++ b/flask_security/translations/ja_JP/LC_MESSAGES/flask_security.po
+@@ -0,0 +1,328 @@
++# Translations template for Flask-Security.
++# Copyright (C) 2017 CERN
++# This file is distributed under the same license as the Flask-Security
++# project.
++# FIRST AUTHOR <EMAIL@ADDRESS>, 2017.
++#
++msgid ""
++msgstr ""
++"Project-Id-Version: Flask-Security 2.0.1\n"
++"Report-Msgid-Bugs-To: info@inveniosoftware.org\n"
++"POT-Creation-Date: 2017-06-06 13:23+0200\n"
++"PO-Revision-Date: 2018-01-25 14:12+0900\n"
++"Language-Team: \n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=UTF-8\n"
++"Content-Transfer-Encoding: 8bit\n"
++"Generated-By: Babel 2.4.0\n"
++"X-Generator: Poedit 2.0.6\n"
++"Last-Translator: \n"
++"Plural-Forms: nplurals=1; plural=0;\n"
++"Language: ja\n"
++
++#: flask_security/core.py:99
++msgid "Login Required"
++msgstr "ログインが必要です"
++
++#: flask_security/core.py:100
++msgid "Welcome"
++msgstr "ようこそ"
++
++#: flask_security/core.py:101
++msgid "Please confirm your email"
++msgstr "メール アドレスの検証"
++
++#: flask_security/core.py:102
++msgid "Login instructions"
++msgstr "ログイン手順"
++
++#: flask_security/core.py:103
++#: flask_security/templates/security/email/reset_notice.html:1
++msgid "Your password has been reset"
++msgstr "パスワード変更"
++
++#: flask_security/core.py:104
++msgid "Your password has been changed"
++msgstr "パスワードが変更されました。"
++
++#: flask_security/core.py:106
++msgid "Password reset instructions"
++msgstr "パスワード再設定手順"
++
++#: flask_security/core.py:132
++msgid "You do not have permission to view this resource."
++msgstr "アクセス権がありません"
++
++#: flask_security/core.py:134
++#, python-format
++msgid "Thank you. Confirmation instructions have been sent to %(email)s."
++msgstr ""
++"ご登録ありがとうございます。%(email)sにメール アドレス検証手順が送信されま"
++"した。"
++
++#: flask_security/core.py:138
++msgid "Thank you. Your email has been confirmed."
++msgstr "ありがとうございます。メール アドレスが検証されました。"
++
++#: flask_security/core.py:140
++msgid "Your email has already been confirmed."
++msgstr "メール アドレスは検証済みです"
++
++#: flask_security/core.py:142
++msgid "Invalid confirmation token."
++msgstr "リンクが無効です"
++
++#: flask_security/core.py:144
++#, python-format
++msgid "%(email)s is already associated with an account."
++msgstr "%(email)s のアカウントは既に作成されています"
++
++#: flask_security/core.py:146
++msgid "Password does not match"
++msgstr "パスワードが一致しません"
++
++#: flask_security/core.py:148
++msgid "Passwords do not match"
++msgstr "入力したパスワードが一致していません"
++
++#: flask_security/core.py:150
++msgid "Redirections outside the domain are forbidden"
++msgstr "ドメイン外へのリダイレクトは禁止されています"
++
++#: flask_security/core.py:152
++#, python-format
++msgid "Instructions to reset your password have been sent to %(email)s."
++msgstr "パスワードの再設定手順が %(email)s に送信されました"
++
++#: flask_security/core.py:155
++#, python-format
++msgid ""
++"You did not reset your password within %(within)s. New instructions have "
++"been sent to %(email)s."
++msgstr ""
++"%(within)s以内にパスワードを設定しませんでした。パスワード再設定手順を "
++"%(email)s に再度送信しました。"
++
++#: flask_security/core.py:158
++msgid "Invalid reset password token."
++msgstr "リンクが無効です"
++
++#: flask_security/core.py:160
++msgid "Email requires confirmation."
++msgstr "メール アドレスの検証が必要です"
++
++#: flask_security/core.py:162
++#, python-format
++msgid "Confirmation instructions have been sent to %(email)s."
++msgstr "%(email)sにメール アドレス検証手順が再送信されました"
++
++#: flask_security/core.py:164
++#, python-format
++msgid ""
++"You did not confirm your email within %(within)s. New instructions to "
++"confirm your email have been sent to %(email)s."
++msgstr ""
++"%(within)s以内にメール アドレスが検証されませんでした。新しい検証手順を "
++"%(email)s に送信しました。"
++
++#: flask_security/core.py:168
++#, python-format
++msgid ""
++"You did not login within %(within)s. New instructions to login have been "
++"sent to %(email)s."
++msgstr ""
++"%(within)s以内にログインしませんでした。ログイン手順を %(email)s に再度送"
++"信しました。"
++
++#: flask_security/core.py:171
++#, python-format
++msgid "Instructions to login have been sent to %(email)s."
++msgstr "%(email)sにログイン手順が送信されました"
++
++#: flask_security/core.py:173
++msgid "Invalid login token."
++msgstr "リンクが無効です"
++
++#: flask_security/core.py:175
++msgid "Account is disabled."
++msgstr "アカウントが無効になっています"
++
++#: flask_security/core.py:177
++msgid "Email not provided"
++msgstr "メール アドレスを入力してください"
++
++#: flask_security/core.py:179
++msgid "Invalid email address"
++msgstr "正しいメール アドレスを入力してください"
++
++#: flask_security/core.py:181
++msgid "Password not provided"
++msgstr "パスワードを入力してください"
++
++#: flask_security/core.py:183
++msgid "No password is set for this user"
++msgstr "パスワードが設定されていません"
++
++#: flask_security/core.py:185
++msgid "Password must be at least 6 characters"
++msgstr "パスワードは6文字以上でなければなりません"
++
++#: flask_security/core.py:187
++msgid "Specified user does not exist"
++msgstr "入力を確認してください"
++
++#: flask_security/core.py:189
++msgid "Invalid password"
++msgstr "入力を確認してください"
++
++#: flask_security/core.py:191
++msgid "You have successfully logged in."
++msgstr "ログインしました"
++
++#: flask_security/core.py:193
++msgid "Forgot password?"
++msgstr "パスワードを忘れた場合"
++
++#: flask_security/core.py:195
++msgid ""
++"You successfully reset your password and you have been logged in "
++"automatically."
++msgstr "パスワードの再設定が完了しました。"
++
++#: flask_security/core.py:198
++msgid "Your new password must be different than your previous password."
++msgstr "新旧パスワードが同じです"
++
++#: flask_security/core.py:201
++msgid "You successfully changed your password."
++msgstr "パスワードが変更されました"
++
++#: flask_security/core.py:203
++msgid "Please log in to access this page."
++msgstr "ログインしてください"
++
++#: flask_security/core.py:205
++msgid "Please reauthenticate to access this page."
++msgstr "再度ログインしてください"
++
++#: flask_security/forms.py:30
++msgid "Email Address"
++msgstr "メール アドレス"
++
++#: flask_security/forms.py:31
++msgid "Password"
++msgstr "パスワード"
++
++#: flask_security/forms.py:32
++msgid "Remember Me"
++msgstr "次回以降ログインを省略する"
++
++#: flask_security/forms.py:33 flask_security/templates/security/_menu.html:4
++#: flask_security/templates/security/login_user.html:3
++#: flask_security/templates/security/send_login.html:3
++msgid "Login"
++msgstr "ログイン"
++
++#: flask_security/forms.py:34 flask_security/templates/security/_menu.html:6
++#: flask_security/templates/security/register_user.html:3
++msgid "Register"
++msgstr "ユーザ登録"
++
++#: flask_security/forms.py:35
++msgid "Resend Confirmation Instructions"
++msgstr "検証手順の再送信"
++
++#: flask_security/forms.py:36
++msgid "Recover Password"
++msgstr "再設定手順を送信"
++
++#: flask_security/forms.py:37
++msgid "Reset Password"
++msgstr "パスワード変更"
++
++#: flask_security/forms.py:38
++msgid "Retype Password"
++msgstr "パスワード再入力"
++
++#: flask_security/forms.py:39
++msgid "New Password"
++msgstr "新しいパスワード"
++
++#: flask_security/forms.py:40
++msgid "Change Password"
++msgstr "変更"
++
++#: flask_security/forms.py:41
++msgid "Send Login Link"
++msgstr "ログイン手順を送信"
++
++#: flask_security/templates/security/_menu.html:2
++msgid "Menu"
++msgstr "メニュー"
++
++#: flask_security/templates/security/_menu.html:9
++msgid "Forgot password"
++msgstr "パスワードを忘れた場合"
++
++#: flask_security/templates/security/_menu.html:12
++msgid "Confirm account"
++msgstr "メール アドレスの検証"
++
++#: flask_security/templates/security/change_password.html:3
++msgid "Change password"
++msgstr "パスワードの変更"
++
++#: flask_security/templates/security/forgot_password.html:3
++msgid "Send password reset instructions"
++msgstr "パスワード再設定手順の送信"
++
++#: flask_security/templates/security/reset_password.html:3
++msgid "Reset password"
++msgstr "パスワード再設定"
++
++#: flask_security/templates/security/send_confirmation.html:3
++msgid "Resend confirmation instructions"
++msgstr "検証手順の再送信"
++
++#: flask_security/templates/security/email/change_notice.html:1
++msgid "Your password has been changed."
++msgstr "パスワードが変更されました。"
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "If you did not change your password,"
++msgstr "パスワードを変更した覚えがない場合には、"
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "click here to reset it"
++msgstr "このリンクを開いてください。"
++
++#: flask_security/templates/security/email/confirmation_instructions.html:1
++msgid "Please confirm your email through the link below:"
++msgstr "以下のリンクからメール アドレスを検証してください："
++
++#: flask_security/templates/security/email/confirmation_instructions.html:3
++#: flask_security/templates/security/email/welcome.html:6
++msgid "Confirm my account"
++msgstr "メール アドレスの検証"
++
++#: flask_security/templates/security/email/login_instructions.html:1
++#: flask_security/templates/security/email/welcome.html:1
++#, python-format
++msgid "Welcome %(email)s!"
++msgstr "ようこそ %(email)s ！"
++
++#: flask_security/templates/security/email/login_instructions.html:3
++msgid "You can log into your account through the link below:"
++msgstr "以下のリンクによりログインできます。"
++
++#: flask_security/templates/security/email/login_instructions.html:5
++msgid "Login now"
++msgstr "ログイン"
++
++#: flask_security/templates/security/email/reset_instructions.html:1
++msgid "Click here to reset your password"
++msgstr "パスワードを再設定するためにこのリンクを開いてください。"
++
++#: flask_security/templates/security/email/welcome.html:4
++msgid "You can confirm your email through the link below:"
++msgstr "以下のリンクによりメール アドレスを検証できます。"
+diff --git a/flask_security/translations/nl_NL/LC_MESSAGES/flask_security.po b/flask_security/translations/nl_NL/LC_MESSAGES/flask_security.po
+new file mode 100644
+index 0000000..d503d10
+--- /dev/null
++++ b/flask_security/translations/nl_NL/LC_MESSAGES/flask_security.po
+@@ -0,0 +1,329 @@
++# Dutch (Netherlands) translations for Flask-Security.
++# Copyright (C) 2017 CERN
++# This file is distributed under the same license as the Flask-Security
++# project.
++# FIRST AUTHOR <EMAIL@ADDRESS>, 2017.
++#
++msgid ""
++msgstr ""
++"Project-Id-Version: Flask-Security 2.0.1\n"
++"Report-Msgid-Bugs-To: info@inveniosoftware.org\n"
++"POT-Creation-Date: 2017-04-03 08:59+0200\n"
++"PO-Revision-Date: 2017-05-01 17:52+0200\n"
++"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
++"Language: nl_NL\n"
++"Language-Team: nl_NL <LL@li.org>\n"
++"Plural-Forms: nplurals=2; plural=(n != 1)\n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=utf-8\n"
++"Content-Transfer-Encoding: 8bit\n"
++"Generated-By: Babel 2.2.0\n"
++
++#: flask_security/core.py:98
++msgid "Login Required"
++msgstr "Inloggen Verplicht"
++
++#: flask_security/core.py:99
++msgid "Welcome"
++msgstr "Welkom"
++
++#: flask_security/core.py:100
++msgid "Please confirm your email"
++msgstr "Gelieve uw emailadres te bevestigen"
++
++#: flask_security/core.py:101
++msgid "Login instructions"
++msgstr "Login instructies"
++
++#: flask_security/core.py:102
++#: flask_security/templates/security/email/reset_notice.html:1
++msgid "Your password has been reset"
++msgstr "Uw wachtwoord werd gereset"
++
++#: flask_security/core.py:103
++msgid "Your password has been changed"
++msgstr "Uw wachtwoord werd gewijzigd"
++
++#: flask_security/core.py:105
++msgid "Password reset instructions"
++msgstr "Wachtwoord reset instructies"
++
++#: flask_security/core.py:131
++msgid "You do not have permission to view this resource."
++msgstr "U Heeft niet de nodige rechten om deze pagina te zien."
++
++#: flask_security/core.py:133
++#, python-format
++msgid "Thank you. Confirmation instructions have been sent to %(email)s."
++msgstr "Bedankt. Instructies voor bevestiging zijn verzonden naar %(email)s."
++
++#: flask_security/core.py:137
++msgid "Thank you. Your email has been confirmed."
++msgstr "Bedankt. Uw e-mailadres werd bevestigd."
++
++#: flask_security/core.py:139
++msgid "Your email has already been confirmed."
++msgstr "Uw e-mailadres werd reeds bevestigd."
++
++#: flask_security/core.py:141
++msgid "Invalid confirmation token."
++msgstr "Ongeldig bevestigings token."
++
++#: flask_security/core.py:143
++#, python-format
++msgid "%(email)s is already associated with an account."
++msgstr "%(email)s is al gelinkt aan een ander account."
++
++#: flask_security/core.py:145
++msgid "Password does not match"
++msgstr "Wachtwoord komt niet overeen"
++
++#: flask_security/core.py:147
++msgid "Passwords do not match"
++msgstr "Wachtwoorden komen niet overeen"
++
++#: flask_security/core.py:149
++msgid "Redirections outside the domain are forbidden"
++msgstr "Redirects buiten het domein zijn niet toegelaten"
++
++#: flask_security/core.py:151
++#, python-format
++msgid "Instructions to reset your password have been sent to %(email)s."
++msgstr "Instructies om uw wachtwoord te resetten werden verzonden naar %(email)s."
++
++#: flask_security/core.py:154
++#, python-format
++msgid ""
++"You did not reset your password within %(within)s. New instructions have "
++"been sent to %(email)s."
++msgstr ""
++"U heeft uw wachtwoord niet gereset gedurende %(within)s. Nieuwe instructies werden "
++"verzonden naar %(email)s."
++
++#: flask_security/core.py:157
++msgid "Invalid reset password token."
++msgstr "Ongeldig wachtwoord reset token."
++
++#: flask_security/core.py:159
++msgid "Email requires confirmation."
++msgstr "E-mailadres moet bevestigd worden."
++
++#: flask_security/core.py:161
++#, python-format
++msgid "Confirmation instructions have been sent to %(email)s."
++msgstr "Instructies ter bevestiging van uw e-mailadres werden verzonden naar %(email)s."
++
++#: flask_security/core.py:163
++#, python-format
++msgid ""
++"You did not confirm your email within %(within)s. New instructions to "
++"confirm your email have been sent to %(email)s."
++msgstr ""
++"U heeft uw e-mailadres niet bevestigd in de voorziene %(within)s. Nieuwe "
++"instructies ter bevestiging van uw e-mailadres werden verzonden naar %(email)s."
++
++#: flask_security/core.py:167
++#, python-format
++msgid ""
++"You did not login within %(within)s. New instructions to login have been "
++"sent to %(email)s."
++msgstr ""
++"Je bent niet ingelogd geweest gedurende %(within)s. Nieuwe instructies "
++"om in te loggen werden verzonden naar%(email)s."
++
++#: flask_security/core.py:170
++#, python-format
++msgid "Instructions to login have been sent to %(email)s."
++msgstr "Instructies om in te loggen werden verzonden naar %(email)s."
++
++#: flask_security/core.py:172
++msgid "Invalid login token."
++msgstr "Ongeldige login."
++
++#: flask_security/core.py:174
++msgid "Account is disabled."
++msgstr "Account is geblokkeerd."
++
++#: flask_security/core.py:176
++msgid "Email not provided"
++msgstr "Email niet ingevuld"
++
++#: flask_security/core.py:178
++msgid "Invalid email address"
++msgstr "Ongeldig e-mailadres"
++
++#: flask_security/core.py:180
++msgid "Password not provided"
++msgstr "Wachtwoord niet ingevuld"
++
++#: flask_security/core.py:182
++msgid "No password is set for this user"
++msgstr "Er is geen wachtwoord gezet voor deze gebruiker"
++
++#: flask_security/core.py:184
++msgid "Password must be at least 6 characters"
++msgstr "Uw wachtwoord moet minstens 6 karakters bevatten"
++
++#: flask_security/core.py:186
++msgid "Specified user does not exist"
++msgstr "Deze gebruiker bestaat niet"
++
++#: flask_security/core.py:188
++msgid "Invalid password"
++msgstr "Ongeldig wachtwoord"
++
++#: flask_security/core.py:190
++msgid "You have successfully logged in."
++msgstr "U bent succesvol ingelogd."
++
++#: flask_security/core.py:192
++msgid "Forgot password?"
++msgstr "Wachtwoord vergeten?"
++
++#: flask_security/core.py:194
++msgid ""
++"You successfully reset your password and you have been logged in "
++"automatically."
++msgstr ""
++"U heeft uw wachtwoord succesvol gereset en bent nu automatisch"
++"ingelogd."
++
++
++#: flask_security/core.py:197
++msgid "Your new password must be different than your previous password."
++msgstr "Uw nieuw wachtwoord moet verschillend zijn van het voorgaande wachtwoord."
++
++#: flask_security/core.py:200
++msgid "You successfully changed your password."
++msgstr "Uw wachtwoord werd met succes gewijzigd."
++
++#: flask_security/core.py:202
++msgid "Please log in to access this page."
++msgstr "Gelieve in te loggen om deze pagina te zien."
++
++#: flask_security/core.py:204
++msgid "Please reauthenticate to access this page."
++msgstr "Gelieve opnieuw in te loggen om deze pagina te zien."
++
++#: flask_security/forms.py:31
++msgid "Email Address"
++msgstr "E-mailadres"
++
++#: flask_security/forms.py:32
++msgid "Password"
++msgstr "wachtwoord"
++
++#: flask_security/forms.py:33
++msgid "Remember Me"
++msgstr "Ingelogd blijven"
++
++#: flask_security/forms.py:34 flask_security/templates/security/_menu.html:4
++#: flask_security/templates/security/login_user.html:3
++#: flask_security/templates/security/send_login.html:3
++msgid "Login"
++msgstr "Login"
++
++#: flask_security/forms.py:35 flask_security/templates/security/_menu.html:6
++#: flask_security/templates/security/register_user.html:3
++msgid "Register"
++msgstr "Registreer"
++
++#: flask_security/forms.py:36
++msgid "Resend Confirmation Instructions"
++msgstr "Verzend instructies om te bevestigen opnieuw"
++
++#: flask_security/forms.py:37
++msgid "Recover Password"
++msgstr "Herstel wachtwoord"
++
++#: flask_security/forms.py:38
++msgid "Reset Password"
++msgstr "reset wachtwoord"
++
++#: flask_security/forms.py:39
++msgid "Retype Password"
++msgstr "Hertyp wachtwoord"
++
++#: flask_security/forms.py:40
++msgid "New Password"
++msgstr "Nieuw wachtwoord"
++
++#: flask_security/forms.py:41
++msgid "Change Password"
++msgstr "Verander wachtwoord"
++
++#: flask_security/forms.py:42
++msgid "Send Login Link"
++msgstr "Verzend login link"
++
++#: flask_security/templates/security/_menu.html:2
++msgid "Menu"
++msgstr "Menu"
++
++#: flask_security/templates/security/_menu.html:9
++msgid "Forgot password"
++msgstr "Wachtwoord vergeten"
++
++#: flask_security/templates/security/_menu.html:12
++msgid "Confirm account"
++msgstr "Bevestig account"
++
++#: flask_security/templates/security/change_password.html:3
++msgid "Change password"
++msgstr "Verander wachtwoord"
++
++#: flask_security/templates/security/forgot_password.html:3
++msgid "Send password reset instructions"
++msgstr "Verzend wachtwoord reset instructies"
++
++#: flask_security/templates/security/reset_password.html:3
++msgid "Reset password"
++msgstr "Reset wachtwoord"
++
++#: flask_security/templates/security/send_confirmation.html:3
++msgid "Resend confirmation instructions"
++msgstr "Verzend bevestigings instructies opnieuw"
++
++#: flask_security/templates/security/email/change_notice.html:1
++msgid "Your password has been changed."
++msgstr "Uw wachtwoord werd gewijzigd."
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "If you did not change your password,"
++msgstr "Als u uw wachtwoord niet hebt aangepast,"
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "click here to reset it"
++msgstr "Klik hier om het te resetten"
++
++#: flask_security/templates/security/email/confirmation_instructions.html:1
++msgid "Please confirm your email through the link below:"
++msgstr "Gelieve uw e-mailadres te bevestigen via onderstaande link:"
++
++#: flask_security/templates/security/email/confirmation_instructions.html:3
++#: flask_security/templates/security/email/welcome.html:6
++msgid "Confirm my account"
++msgstr "Bevestig mijn account"
++
++#: flask_security/templates/security/email/login_instructions.html:1
++#: flask_security/templates/security/email/welcome.html:1
++#, python-format
++msgid "Welcome %(email)s!"
++msgstr "Welkom, %(email)s!"
++
++#: flask_security/templates/security/email/login_instructions.html:3
++msgid "You can log into your through the link below:"
++msgstr "U kan zich aanmelden via de onderstaande link:"
++
++#: flask_security/templates/security/email/login_instructions.html:5
++msgid "Login now"
++msgstr "Nu inloggen"
++
++#: flask_security/templates/security/email/reset_instructions.html:1
++msgid "Click here to reset your password"
++msgstr "Klik hier om uw wachtwoord te resetten"
++
++#: flask_security/templates/security/email/welcome.html:4
++msgid "You can confirm your email through the link below:"
++msgstr "U kan uw e-mailadres bevestigen via de onderstaande link:"
++
+diff --git a/flask_security/translations/pt_BR/LC_MESSAGES/flask_security.po b/flask_security/translations/pt_BR/LC_MESSAGES/flask_security.po
+new file mode 100644
+index 0000000..22fa32e
+--- /dev/null
++++ b/flask_security/translations/pt_BR/LC_MESSAGES/flask_security.po
+@@ -0,0 +1,324 @@
++# Translations template for Flask-Security.
++# Copyright (C) 2017 CERN
++# This file is distributed under the same license as the Flask-Security
++# project.
++# José Neto <josenetodino@gmail.com>, 2017.
++#
++msgid ""
++msgstr ""
++"Project-Id-Version: Flask-Security 2.0.1\n"
++"Report-Msgid-Bugs-To: info@inveniosoftware.org\n"
++"POT-Creation-Date: 2017-06-06 13:23+0200\n"
++"PO-Revision-Date: 2017-09-27 23:39-0300\n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=utf-8\n"
++"Content-Transfer-Encoding: 8bit\n"
++"Generated-By: Babel 2.4.0\n"
++"Last-Translator: José Neto <josenetodino@gmail.com>\n"
++"Language-Team: \n"
++"Language: pt_BR\n"
++"X-Generator: Poedit 1.8.12\n"
++
++#: flask_security/core.py:99
++msgid "Login Required"
++msgstr "Login obrigatório"
++
++#: flask_security/core.py:100
++msgid "Welcome"
++msgstr "Bem-vindo"
++
++#: flask_security/core.py:101
++msgid "Please confirm your email"
++msgstr "Por favor, confirme seu email"
++
++#: flask_security/core.py:102
++msgid "Login instructions"
++msgstr "Instruções de login"
++
++#: flask_security/core.py:103
++#: flask_security/templates/security/email/reset_notice.html:1
++msgid "Your password has been reset"
++msgstr "Sua senha foi redefinida"
++
++#: flask_security/core.py:104
++msgid "Your password has been changed"
++msgstr "Sua senha foi alterada"
++
++#: flask_security/core.py:106
++msgid "Password reset instructions"
++msgstr "Instruções para redfinir a senha"
++
++#: flask_security/core.py:132
++msgid "You do not have permission to view this resource."
++msgstr "Você não tem permissão para ver este recurso"
++
++#: flask_security/core.py:134
++#, python-format
++msgid "Thank you. Confirmation instructions have been sent to %(email)s."
++msgstr "Obrigado. As instruções para a confirmação foram enviadas para %(email)s."
++
++#: flask_security/core.py:138
++msgid "Thank you. Your email has been confirmed."
++msgstr "Obrigado. Seu email foi confirmado."
++
++#: flask_security/core.py:140
++msgid "Your email has already been confirmed."
++msgstr "Seu email já foi confirmado."
++
++#: flask_security/core.py:142
++msgid "Invalid confirmation token."
++msgstr "Token de confirmação inválido."
++
++#: flask_security/core.py:144
++#, python-format
++msgid "%(email)s is already associated with an account."
++msgstr "%(email)s já está associado a uma conta."
++
++#: flask_security/core.py:146
++msgid "Password does not match"
++msgstr "Senha não confere"
++
++#: flask_security/core.py:148
++msgid "Passwords do not match"
++msgstr "Senhas não conferem"
++
++#: flask_security/core.py:150
++msgid "Redirections outside the domain are forbidden"
++msgstr "Redirecionamentos para fora do domínio são proibidos"
++
++#: flask_security/core.py:152
++#, python-format
++msgid "Instructions to reset your password have been sent to %(email)s."
++msgstr "As instruções para redefinir sua senha foram enviadas para %(email)s."
++
++#: flask_security/core.py:155
++#, python-format
++msgid ""
++"You did not reset your password within %(within)s. New instructions have been "
++"sent to %(email)s."
++msgstr ""
++"Você não redefiniu sua senha dentro de %(within)s. Novas instruções foram "
++"enviadas para %(email)s."
++
++#: flask_security/core.py:158
++msgid "Invalid reset password token."
++msgstr "Token de redefinição de senha inválido."
++
++#: flask_security/core.py:160
++msgid "Email requires confirmation."
++msgstr "O email requer confirmação."
++
++#: flask_security/core.py:162
++#, python-format
++msgid "Confirmation instructions have been sent to %(email)s."
++msgstr "As instruções de confirmaç foram enviadas para %(email)s."
++
++#: flask_security/core.py:164
++#, python-format
++msgid ""
++"You did not confirm your email within %(within)s. New instructions to confirm "
++"your email have been sent to %(email)s."
++msgstr ""
++"Você não confirmou seu email dentro de %(within)s. Novas instruções foram "
++"enviadas para %(email)s."
++
++#: flask_security/core.py:168
++#, python-format
++msgid ""
++"You did not login within %(within)s. New instructions to login have been sent "
++"to %(email)s."
++msgstr ""
++"Você não logou dentro de %(within)s. Novas instruções para logar foram enviadas "
++"para %(email)s."
++
++#: flask_security/core.py:171
++#, python-format
++msgid "Instructions to login have been sent to %(email)s."
++msgstr "Instruções para logar foram enviadas para %(email)s."
++
++#: flask_security/core.py:173
++msgid "Invalid login token."
++msgstr "Token de login inválido."
++
++#: flask_security/core.py:175
++msgid "Account is disabled."
++msgstr "Conta desabilitada."
++
++#: flask_security/core.py:177
++msgid "Email not provided"
++msgstr "Email não informado"
++
++#: flask_security/core.py:179
++msgid "Invalid email address"
++msgstr "Endereço de email inválido"
++
++#: flask_security/core.py:181
++msgid "Password not provided"
++msgstr "Senha não informada"
++
++#: flask_security/core.py:183
++msgid "No password is set for this user"
++msgstr "Nenhuma senha definida para este usuário"
++
++#: flask_security/core.py:185
++msgid "Password must be at least 6 characters"
++msgstr "A senha deve ter pelo menos 6 caracteres"
++
++#: flask_security/core.py:187
++msgid "Specified user does not exist"
++msgstr "Usuário não existe"
++
++#: flask_security/core.py:189
++msgid "Invalid password"
++msgstr "Senha inválida"
++
++#: flask_security/core.py:191
++msgid "You have successfully logged in."
++msgstr "Você logou com sucesso."
++
++#: flask_security/core.py:193
++msgid "Forgot password?"
++msgstr "Esqueceu a senha?"
++
++#: flask_security/core.py:195
++msgid ""
++"You successfully reset your password and you have been logged in automatically."
++msgstr "Você redefiniu sua senha com sucesso e foi logado automaticamente."
++
++#: flask_security/core.py:198
++msgid "Your new password must be different than your previous password."
++msgstr "Sua nova senha deve ser diferente da sua senha anterior."
++
++#: flask_security/core.py:201
++msgid "You successfully changed your password."
++msgstr "Você alterou sua senha com sucesso."
++
++#: flask_security/core.py:203
++msgid "Please log in to access this page."
++msgstr "Por favor, logue para acessar esta página."
++
++#: flask_security/core.py:205
++msgid "Please reauthenticate to access this page."
++msgstr "Por favor, reautentique-se para acessar esta página."
++
++#: flask_security/forms.py:30
++msgid "Email Address"
++msgstr "Endereço de email"
++
++#: flask_security/forms.py:31
++msgid "Password"
++msgstr "Senha"
++
++#: flask_security/forms.py:32
++msgid "Remember Me"
++msgstr "Lembre de mim"
++
++#: flask_security/forms.py:33 flask_security/templates/security/_menu.html:4
++#: flask_security/templates/security/login_user.html:3
++#: flask_security/templates/security/send_login.html:3
++msgid "Login"
++msgstr "Login"
++
++#: flask_security/forms.py:34 flask_security/templates/security/_menu.html:6
++#: flask_security/templates/security/register_user.html:3
++msgid "Register"
++msgstr "Registro"
++
++#: flask_security/forms.py:35
++msgid "Resend Confirmation Instructions"
++msgstr "Reenviar instruções de confirmação"
++
++#: flask_security/forms.py:36
++msgid "Recover Password"
++msgstr "Recuperar senha"
++
++#: flask_security/forms.py:37
++msgid "Reset Password"
++msgstr "Redefinir senha"
++
++#: flask_security/forms.py:38
++msgid "Retype Password"
++msgstr "Reescreva a senha"
++
++#: flask_security/forms.py:39
++msgid "New Password"
++msgstr "Nova senha"
++
++#: flask_security/forms.py:40
++msgid "Change Password"
++msgstr "Alterar senha"
++
++#: flask_security/forms.py:41
++msgid "Send Login Link"
++msgstr "Enviar link de login"
++
++#: flask_security/templates/security/_menu.html:2
++msgid "Menu"
++msgstr "Menu"
++
++#: flask_security/templates/security/_menu.html:9
++msgid "Forgot password"
++msgstr "Esqueceu a senha"
++
++#: flask_security/templates/security/_menu.html:12
++msgid "Confirm account"
++msgstr "Confirmar conta"
++
++#: flask_security/templates/security/change_password.html:3
++msgid "Change password"
++msgstr "Alterar senha"
++
++#: flask_security/templates/security/forgot_password.html:3
++msgid "Send password reset instructions"
++msgstr "Enviar instruções para redefinir a senha"
++
++#: flask_security/templates/security/reset_password.html:3
++msgid "Reset password"
++msgstr "Redefinir senha"
++
++#: flask_security/templates/security/send_confirmation.html:3
++msgid "Resend confirmation instructions"
++msgstr "Reenviar instruções de confirmação"
++
++#: flask_security/templates/security/email/change_notice.html:1
++msgid "Your password has been changed."
++msgstr "Sua senha foi alterada."
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "If you did not change your password,"
++msgstr "Se você não alterou sua senha,"
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "click here to reset it"
++msgstr "clique aqui para resetar"
++
++#: flask_security/templates/security/email/confirmation_instructions.html:1
++msgid "Please confirm your email through the link below:"
++msgstr "Por favor, confirme seu email através do link abaixo:"
++
++#: flask_security/templates/security/email/confirmation_instructions.html:3
++#: flask_security/templates/security/email/welcome.html:6
++msgid "Confirm my account"
++msgstr "Confirmar minha conta"
++
++#: flask_security/templates/security/email/login_instructions.html:1
++#: flask_security/templates/security/email/welcome.html:1
++#, python-format
++msgid "Welcome %(email)s!"
++msgstr "Bem-vindo %(email)s!"
++
++#: flask_security/templates/security/email/login_instructions.html:3
++msgid "You can log into your account through the link below:"
++msgstr "Você pode logar na sua conta através do link abaixo:"
++
++#: flask_security/templates/security/email/login_instructions.html:5
++msgid "Login now"
++msgstr "Logar agora"
++
++#: flask_security/templates/security/email/reset_instructions.html:1
++msgid "Click here to reset your password"
++msgstr "Clique aqui para redefinir sua senha"
++
++#: flask_security/templates/security/email/welcome.html:4
++msgid "You can confirm your email through the link below:"
++msgstr "Você pode confirmar seu email através do link abaixo:"
+diff --git a/flask_security/translations/pt_PT/LC_MESSAGES/flask_security.po b/flask_security/translations/pt_PT/LC_MESSAGES/flask_security.po
+new file mode 100644
+index 0000000..641ce39
+--- /dev/null
++++ b/flask_security/translations/pt_PT/LC_MESSAGES/flask_security.po
+@@ -0,0 +1,323 @@
++# Translations template for Flask-Security.
++# Copyright (C) 2017 CERN
++# This file is distributed under the same license as the Flask-Security
++# project.
++# Micael Grilo <micael.grilo@outlook.com>, 2018.
++#
++msgid ""
++msgstr ""
++"Project-Id-Version: Flask-Security 2.0.1\n"
++"Report-Msgid-Bugs-To: info@inveniosoftware.org\n"
++"POT-Creation-Date: 2017-06-06 13:23+0200\n"
++"PO-Revision-Date: 2018-04-27 14:00+0100\n"
++"Last-Translator: Micael Grilo <micael.grilo@outlook.com>\n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=utf-8\n"
++"Content-Transfer-Encoding: 8bit\n"
++"Language-Team: \n"
++"Language: pt_PT\n"
++"Generated-By: Babel 2.4.0\n"
++
++#: flask_security/core.py:99
++msgid "Login Required"
++msgstr "Login obrigatório"
++
++#: flask_security/core.py:100
++msgid "Welcome"
++msgstr "Bem-vindo"
++
++#: flask_security/core.py:101
++msgid "Please confirm your email"
++msgstr "Por favor, confirme o seu email"
++
++#: flask_security/core.py:102
++msgid "Login instructions"
++msgstr "Instruções de login"
++
++#: flask_security/core.py:103
++#: flask_security/templates/security/email/reset_notice.html:1
++msgid "Your password has been reset"
++msgstr "A sua palavra-passe foi redefinida"
++
++#: flask_security/core.py:104
++msgid "Your password has been changed"
++msgstr "A sua palavra-passe foi alterada"
++
++#: flask_security/core.py:106
++msgid "Password reset instructions"
++msgstr "Instruções para redefinir a palavra-passe"
++
++#: flask_security/core.py:132
++msgid "You do not have permission to view this resource."
++msgstr "Não tem permissões para ver este recurso"
++
++#: flask_security/core.py:134
++#, python-format
++msgid "Thank you. Confirmation instructions have been sent to %(email)s."
++msgstr "Obrigado. As instruções para a confirmação foram enviadas para %(email)s."
++
++#: flask_security/core.py:138
++msgid "Thank you. Your email has been confirmed."
++msgstr "Obrigado. O seu email foi confirmado."
++
++#: flask_security/core.py:140
++msgid "Your email has already been confirmed."
++msgstr "O seu email já foi confirmado."
++
++#: flask_security/core.py:142
++msgid "Invalid confirmation token."
++msgstr "Token de confirmação inválido."
++
++#: flask_security/core.py:144
++#, python-format
++msgid "%(email)s is already associated with an account."
++msgstr "%(email)s já está associado a uma conta."
++
++#: flask_security/core.py:146
++msgid "Password does not match"
++msgstr "Palavra-passe não coincide"
++
++#: flask_security/core.py:148
++msgid "Passwords do not match"
++msgstr "Palavras-passe não coincidem"
++
++#: flask_security/core.py:150
++msgid "Redirections outside the domain are forbidden"
++msgstr "Redirecionamentos para fora do domínio são proibidos"
++
++#: flask_security/core.py:152
++#, python-format
++msgid "Instructions to reset your password have been sent to %(email)s."
++msgstr "As instruções para redefinir a sua palavra-passe foram enviadas para %(email)s."
++
++#: flask_security/core.py:155
++#, python-format
++msgid ""
++"You did not reset your password within %(within)s. New instructions have been "
++"sent to %(email)s."
++msgstr ""
++"Não redefiniu a sua palavra-passe dentro de %(within)s. Novas instruções foram "
++"enviadas para %(email)s."
++
++#: flask_security/core.py:158
++msgid "Invalid reset password token."
++msgstr "Token de redefinição de senha inválido."
++
++#: flask_security/core.py:160
++msgid "Email requires confirmation."
++msgstr "O email requer confirmação."
++
++#: flask_security/core.py:162
++#, python-format
++msgid "Confirmation instructions have been sent to %(email)s."
++msgstr "As instruções de confirmação foram enviadas para %(email)s."
++
++#: flask_security/core.py:164
++#, python-format
++msgid ""
++"You did not confirm your email within %(within)s. New instructions to confirm "
++"your email have been sent to %(email)s."
++msgstr ""
++"Não confirmou o seu email dentro de %(within)s. Novas instruções foram "
++"enviadas para %(email)s."
++
++#: flask_security/core.py:168
++#, python-format
++msgid ""
++"You did not login within %(within)s. New instructions to login have been sent "
++"to %(email)s."
++msgstr ""
++"Não iniciou sessão dentro de %(within)s. Novas instruções de inicio de sessão foram enviadas "
++"para %(email)s."
++
++#: flask_security/core.py:171
++#, python-format
++msgid "Instructions to login have been sent to %(email)s."
++msgstr "Instruções para o inicio de sessão foram enviadas para %(email)s."
++
++#: flask_security/core.py:173
++msgid "Invalid login token."
++msgstr "Token de login inválido."
++
++#: flask_security/core.py:175
++msgid "Account is disabled."
++msgstr "Conta desactivada."
++
++#: flask_security/core.py:177
++msgid "Email not provided"
++msgstr "Email em falta"
++
++#: flask_security/core.py:179
++msgid "Invalid email address"
++msgstr "Endereço de email inválido"
++
++#: flask_security/core.py:181
++msgid "Password not provided"
++msgstr "Palavra-passe em falta"
++
++#: flask_security/core.py:183
++msgid "No password is set for this user"
++msgstr "Nenhuma palavra-passe foi definida para este utilizador"
++
++#: flask_security/core.py:185
++msgid "Password must be at least 6 characters"
++msgstr "A palavra-passe deve ter pelo menos 6 caracteres"
++
++#: flask_security/core.py:187
++msgid "Specified user does not exist"
++msgstr "Utilizador não existe"
++
++#: flask_security/core.py:189
++msgid "Invalid password"
++msgstr "Palavra-passe inválida"
++
++#: flask_security/core.py:191
++msgid "You have successfully logged in."
++msgstr "Sessão iniciada com sucesso."
++
++#: flask_security/core.py:193
++msgid "Forgot password?"
++msgstr "Esqueceu a palavra-passe?"
++
++#: flask_security/core.py:195
++msgid ""
++"You successfully reset your password and you have been logged in automatically."
++msgstr "Redefiniu a sua palavra-passe com sucesso e iniciou sessão automaticamente."
++
++#: flask_security/core.py:198
++msgid "Your new password must be different than your previous password."
++msgstr "A sua nova palavra-passe deve ser diferente da anterior."
++
++#: flask_security/core.py:201
++msgid "You successfully changed your password."
++msgstr "Alterou a sua palavra-passe com sucesso."
++
++#: flask_security/core.py:203
++msgid "Please log in to access this page."
++msgstr "Por favor, inicie sessão para aceder a esta página."
++
++#: flask_security/core.py:205
++msgid "Please reauthenticate to access this page."
++msgstr "Por favor, reautentique-se para aceder esta página."
++
++#: flask_security/forms.py:30
++msgid "Email Address"
++msgstr "Endereço de email"
++
++#: flask_security/forms.py:31
++msgid "Password"
++msgstr "Palavra-passe"
++
++#: flask_security/forms.py:32
++msgid "Remember Me"
++msgstr "Lembrar-me"
++
++#: flask_security/forms.py:33 flask_security/templates/security/_menu.html:4
++#: flask_security/templates/security/login_user.html:3
++#: flask_security/templates/security/send_login.html:3
++msgid "Login"
++msgstr "Login"
++
++#: flask_security/forms.py:34 flask_security/templates/security/_menu.html:6
++#: flask_security/templates/security/register_user.html:3
++msgid "Register"
++msgstr "Registo"
++
++#: flask_security/forms.py:35
++msgid "Resend Confirmation Instructions"
++msgstr "Reenviar instruções de confirmação"
++
++#: flask_security/forms.py:36
++msgid "Recover Password"
++msgstr "Recuperar palavra-passe"
++
++#: flask_security/forms.py:37
++msgid "Reset Password"
++msgstr "Redefinir palavra-passe"
++
++#: flask_security/forms.py:38
++msgid "Retype Password"
++msgstr "Reescreva a palavra-passe"
++
++#: flask_security/forms.py:39
++msgid "New Password"
++msgstr "Nova palavra-passe"
++
++#: flask_security/forms.py:40
++msgid "Change Password"
++msgstr "Alterar palavra-passe"
++
++#: flask_security/forms.py:41
++msgid "Send Login Link"
++msgstr "Enviar endereço de login"
++
++#: flask_security/templates/security/_menu.html:2
++msgid "Menu"
++msgstr "Menu"
++
++#: flask_security/templates/security/_menu.html:9
++msgid "Forgot password"
++msgstr "Esqueceu a palavra-passe"
++
++#: flask_security/templates/security/_menu.html:12
++msgid "Confirm account"
++msgstr "Confirmar conta"
++
++#: flask_security/templates/security/change_password.html:3
++msgid "Change password"
++msgstr "Alterar palavra-passe"
++
++#: flask_security/templates/security/forgot_password.html:3
++msgid "Send password reset instructions"
++msgstr "Enviar instruções para redefinir a palavra-passe"
++
++#: flask_security/templates/security/reset_password.html:3
++msgid "Reset password"
++msgstr "Redefinir palavra-passe"
++
++#: flask_security/templates/security/send_confirmation.html:3
++msgid "Resend confirmation instructions"
++msgstr "Reenviar instruções de confirmação"
++
++#: flask_security/templates/security/email/change_notice.html:1
++msgid "Your password has been changed."
++msgstr "A sua palavra-passe foi alterada."
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "If you did not change your password,"
++msgstr "Não alterou a sua palavra-passe,"
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "click here to reset it"
++msgstr "clique aqui para redefinir"
++
++#: flask_security/templates/security/email/confirmation_instructions.html:1
++msgid "Please confirm your email through the link below:"
++msgstr "Por favor, confirme o seu email através do endereço abaixo:"
++
++#: flask_security/templates/security/email/confirmation_instructions.html:3
++#: flask_security/templates/security/email/welcome.html:6
++msgid "Confirm my account"
++msgstr "Confirmar minha conta"
++
++#: flask_security/templates/security/email/login_instructions.html:1
++#: flask_security/templates/security/email/welcome.html:1
++#, python-format
++msgid "Welcome %(email)s!"
++msgstr "Bem-vindo %(email)s!"
++
++#: flask_security/templates/security/email/login_instructions.html:3
++msgid "You can log into your account through the link below:"
++msgstr "Você pode iniciar sessão na sua conta através do endereço abaixo:"
++
++#: flask_security/templates/security/email/login_instructions.html:5
++msgid "Login now"
++msgstr "Iniciar sessão"
++
++#: flask_security/templates/security/email/reset_instructions.html:1
++msgid "Click here to reset your password"
++msgstr "Clique aqui para redefinir a sua palavra-passe"
++
++#: flask_security/templates/security/email/welcome.html:4
++msgid "You can confirm your email through the link below:"
++msgstr "Você pode confirmar o seu email através do endereço abaixo:"
+diff --git a/flask_security/translations/zh_Hans_CN/LC_MESSAGES/flask_security.po b/flask_security/translations/zh_Hans_CN/LC_MESSAGES/flask_security.po
+new file mode 100644
+index 0000000..533828e
+--- /dev/null
++++ b/flask_security/translations/zh_Hans_CN/LC_MESSAGES/flask_security.po
+@@ -0,0 +1,324 @@
++# Chinese (Simplified, China) translations for Flask-Security.
++# Copyright (C) 2017 CERN
++# This file is distributed under the same license as the Flask-Security
++# project.
++# FIRST AUTHOR <EMAIL@ADDRESS>, 2017.
++#
++msgid ""
++msgstr ""
++"Project-Id-Version: Flask-Security 2.0.1\n"
++"Report-Msgid-Bugs-To: info@inveniosoftware.org\n"
++"POT-Creation-Date: 2017-06-06 13:23+0200\n"
++"PO-Revision-Date: 2018-08-02 19:55+0800\n"
++"Last-Translator: SteinKuo <guoming054@gmail.com>\n"
++"Language: zh_CN\n"
++"Language-Team: Chinese Simplified <LL@li.org>\n"
++"Plural-Forms: nplurals=1; plural=0\n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=utf-8\n"
++"Content-Transfer-Encoding: 8bit\n"
++"Generated-By: Babel 2.6.0\n"
++
++#: flask_security/core.py:99
++msgid "Login Required"
++msgstr "需要登录"
++
++#: flask_security/core.py:100
++msgid "Welcome"
++msgstr "欢迎"
++
++#: flask_security/core.py:101
++msgid "Please confirm your email"
++msgstr "请激活你的电子邮箱"
++
++#: flask_security/core.py:102
++msgid "Login instructions"
++msgstr "登录邮件"
++
++#: flask_security/core.py:103
++#: flask_security/templates/security/email/reset_notice.html:1
++msgid "Your password has been reset"
++msgstr "你的密码已重置"
++
++#: flask_security/core.py:104
++msgid "Your password has been changed"
++msgstr "你的密码已更改"
++
++#: flask_security/core.py:106
++msgid "Password reset instructions"
++msgstr "密码重置"
++
++#: flask_security/core.py:132
++msgid "You do not have permission to view this resource."
++msgstr "你无权查看此资源！"
++
++#: flask_security/core.py:134
++#, python-format
++msgid "Thank you. Confirmation instructions have been sent to %(email)s."
++msgstr "谢谢你。已发送激活邮件到 %(email)s。"
++
++#: flask_security/core.py:138
++msgid "Thank you. Your email has been confirmed."
++msgstr "谢谢。你的邮箱已激活！"
++
++#: flask_security/core.py:140
++msgid "Your email has already been confirmed."
++msgstr "你的邮箱已激活！"
++
++#: flask_security/core.py:142
++msgid "Invalid confirmation token."
++msgstr "无效验证码！"
++
++#: flask_security/core.py:144
++#, python-format
++msgid "%(email)s is already associated with an account."
++msgstr "%(email)s 已关联账户。"
++
++#: flask_security/core.py:146
++msgid "Password does not match"
++msgstr "密码不匹配"
++
++#: flask_security/core.py:148
++msgid "Passwords do not match"
++msgstr "密码不匹配"
++
++#: flask_security/core.py:150
++msgid "Redirections outside the domain are forbidden"
++msgstr "禁止域名外重定向"
++
++#: flask_security/core.py:152
++#, python-format
++msgid "Instructions to reset your password have been sent to %(email)s."
++msgstr "重置密码邮件已发送到 %(email)s。"
++
++#: flask_security/core.py:155
++#, python-format
++msgid ""
++"You did not reset your password within %(within)s. New instructions have "
++"been sent to %(email)s."
++msgstr ""
++"你未在 %(within)s 重置密码。新重置密码邮件已发送到 %(email)s。"
++
++#: flask_security/core.py:158
++msgid "Invalid reset password token."
++msgstr "密码重置验证码无效！"
++
++#: flask_security/core.py:160
++msgid "Email requires confirmation."
++msgstr "请先激活邮箱。"
++
++#: flask_security/core.py:162
++#, python-format
++msgid "Confirmation instructions have been sent to %(email)s."
++msgstr "激活邮件已发送到  %(email)s。"
++
++#: flask_security/core.py:164
++#, python-format
++msgid ""
++"You did not confirm your email within %(within)s. New instructions to "
++"confirm your email have been sent to %(email)s."
++msgstr ""
++"你未在 %(within)s 激活邮箱。新激活邮件已发送到 %(email)s。"
++
++#: flask_security/core.py:168
++#, python-format
++msgid ""
++"You did not login within %(within)s. New instructions to login have been "
++"sent to %(email)s."
++msgstr ""
++"你未在 %(within)s 登录账户。新登录邮件已发送到 %(email)s。"
++
++#: flask_security/core.py:171
++#, python-format
++msgid "Instructions to login have been sent to %(email)s."
++msgstr "登录邮件已发送到 %(email)s。"
++
++#: flask_security/core.py:173
++msgid "Invalid login token."
++msgstr "无效登录验证码！"
++
++#: flask_security/core.py:175
++msgid "Account is disabled."
++msgstr "账户已被禁用！"
++
++#: flask_security/core.py:177
++msgid "Email not provided"
++msgstr "未填写电子邮箱"
++
++#: flask_security/core.py:179
++msgid "Invalid email address"
++msgstr "无效邮箱地址"
++
++#: flask_security/core.py:181
++msgid "Password not provided"
++msgstr "未填写密码"
++
++#: flask_security/core.py:183
++msgid "No password is set for this user"
++msgstr "此账户未设置密码"
++
++#: flask_security/core.py:185
++msgid "Password must be at least 6 characters"
++msgstr "密码至少6个字符"
++
++#: flask_security/core.py:187
++msgid "Specified user does not exist"
++msgstr "此用户不存在"
++
++#: flask_security/core.py:189
++msgid "Invalid password"
++msgstr "密码不正确"
++
++#: flask_security/core.py:191
++msgid "You have successfully logged in."
++msgstr "你已成功登录！"
++
++#: flask_security/core.py:193
++msgid "Forgot password?"
++msgstr "忘记密码？"
++
++#: flask_security/core.py:195
++msgid ""
++"You successfully reset your password and you have been logged in "
++"automatically."
++msgstr ""
++"你的密码已成功重置，并已自动登录。"
++
++#: flask_security/core.py:198
++msgid "Your new password must be different than your previous password."
++msgstr "你的新密码不能与当前密码相同。"
++
++#: flask_security/core.py:201
++msgid "You successfully changed your password."
++msgstr "你已成功更改密码！"
++
++#: flask_security/core.py:203
++msgid "Please log in to access this page."
++msgstr "请登录访问此页面。"
++
++#: flask_security/core.py:205
++msgid "Please reauthenticate to access this page."
++msgstr "请重新进行身份验证，以访问此页面。"
++
++#: flask_security/forms.py:30
++msgid "Email Address"
++msgstr "邮箱地址"
++
++#: flask_security/forms.py:31
++msgid "Password"
++msgstr "密码"
++
++#: flask_security/forms.py:32
++msgid "Remember Me"
++msgstr "记住我"
++
++#: flask_security/forms.py:33 flask_security/templates/security/_menu.html:4
++#: flask_security/templates/security/login_user.html:3
++#: flask_security/templates/security/send_login.html:3
++msgid "Login"
++msgstr "登录"
++
++#: flask_security/forms.py:34 flask_security/templates/security/_menu.html:6
++#: flask_security/templates/security/register_user.html:3
++msgid "Register"
++msgstr "注册"
++
++#: flask_security/forms.py:35
++msgid "Resend Confirmation Instructions"
++msgstr "重新发送邮件验证"
++
++#: flask_security/forms.py:36
++msgid "Recover Password"
++msgstr "恢复密码"
++
++#: flask_security/forms.py:37
++msgid "Reset Password"
++msgstr "重置密码"
++
++#: flask_security/forms.py:38
++msgid "Retype Password"
++msgstr "再次确认密码"
++
++#: flask_security/forms.py:39
++msgid "New Password"
++msgstr "新密码"
++
++#: flask_security/forms.py:40
++msgid "Change Password"
++msgstr "更改密码"
++
++#: flask_security/forms.py:41
++msgid "Send Login Link"
++msgstr "发送登录链接"
++
++#: flask_security/templates/security/_menu.html:2
++msgid "Menu"
++msgstr "菜单"
++
++#: flask_security/templates/security/_menu.html:9
++msgid "Forgot password"
++msgstr "忘记密码"
++
++#: flask_security/templates/security/_menu.html:12
++msgid "Confirm account"
++msgstr "激活账户"
++
++#: flask_security/templates/security/change_password.html:3
++msgid "Change password"
++msgstr "更改密码"
++
++#: flask_security/templates/security/forgot_password.html:3
++msgid "Send password reset instructions"
++msgstr "发送密码重置邮件"
++
++#: flask_security/templates/security/reset_password.html:3
++msgid "Reset password"
++msgstr "重置密码"
++
++#: flask_security/templates/security/send_confirmation.html:3
++msgid "Resend confirmation instructions"
++msgstr "重新发送激活邮件"
++
++#: flask_security/templates/security/email/change_notice.html:1
++msgid "Your password has been changed."
++msgstr "你的密码已更改。"
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "If you did not change your password,"
++msgstr "如果你没更改你的密码，"
++
++#: flask_security/templates/security/email/change_notice.html:3
++msgid "click here to reset it"
++msgstr "点击这里重置密码"
++
++#: flask_security/templates/security/email/confirmation_instructions.html:1
++msgid "Please confirm your email through the link below:"
++msgstr "请通过下面链接激活的你的邮箱："
++
++#: flask_security/templates/security/email/confirmation_instructions.html:3
++#: flask_security/templates/security/email/welcome.html:6
++msgid "Confirm my account"
++msgstr "激活账户"
++
++#: flask_security/templates/security/email/login_instructions.html:1
++#: flask_security/templates/security/email/welcome.html:1
++#, python-format
++msgid "Welcome %(email)s!"
++msgstr "欢迎你，%(email)s!"
++
++#: flask_security/templates/security/email/login_instructions.html:3
++msgid "You can log into your account through the link below:"
++msgstr "你可以通过下面链接登录的你的账户："
++
++#: flask_security/templates/security/email/login_instructions.html:5
++msgid "Login now"
++msgstr "立刻登录"
++
++#: flask_security/templates/security/email/reset_instructions.html:1
++msgid "Click here to reset your password"
++msgstr "点击这里重置密码"
++
++#: flask_security/templates/security/email/welcome.html:4
++msgid "You can confirm your email through the link below:"
++msgstr "你可以通过下面链接激活你的邮箱："
++
+diff --git a/flask_security/utils.py b/flask_security/utils.py
+index b06195f..c56174e 100644
+--- a/flask_security/utils.py
++++ b/flask_security/utils.py
+@@ -17,8 +17,7 @@ import warnings
+ from contextlib import contextmanager
+ from datetime import timedelta
+ 
+-from flask import current_app, flash, render_template, request, session, \
+-    url_for
++from flask import current_app, flash, request, session, url_for
+ from flask_login import login_user as _login_user
+ from flask_login import logout_user as _logout_user
+ from flask_mail import Message
+@@ -383,15 +382,19 @@ def send_mail(subject, recipient, template, **context):
+     context.setdefault('security', _security)
+     context.update(_security._run_ctx_processor('mail'))
+ 
++    sender = _security.email_sender
++    if isinstance(sender, LocalProxy):
++        sender = sender._get_current_object()
++
+     msg = Message(subject,
+-                  sender=_security.email_sender,
++                  sender=sender,
+                   recipients=[recipient])
+ 
+     ctx = ('security/email', template)
+     if config_value('EMAIL_PLAINTEXT'):
+-        msg.body = render_template('%s/%s.txt' % ctx, **context)
++        msg.body = _security.render_template('%s/%s.txt' % ctx, **context)
+     if config_value('EMAIL_HTML'):
+-        msg.html = render_template('%s/%s.html' % ctx, **context)
++        msg.html = _security.render_template('%s/%s.html' % ctx, **context)
+ 
+     if _security._send_mail_task:
+         _security._send_mail_task(msg)
+@@ -447,17 +450,16 @@ def get_identity_attributes(app=None):
+ 
+ def use_double_hash(password_hash=None):
+     """Return a bool indicating whether a password should be hashed twice."""
+-    single_hash = config_value('PASSWORD_SINGLE_HASH')
+-    if single_hash and _security.password_salt:
+-        raise RuntimeError('You may not specify a salt with '
+-                           'SECURITY_PASSWORD_SINGLE_HASH')
++    # Default to plaintext for backward compatibility with
++    # SECURITY_PASSWORD_SINGLE_HASH = False
++    single_hash = config_value('PASSWORD_SINGLE_HASH') or {'plaintext'}
+ 
+     if password_hash is None:
+-        is_plaintext = _security.password_hash == 'plaintext'
++        scheme = _security.password_hash
+     else:
+-        is_plaintext = _pwd_context.identify(password_hash) == 'plaintext'
++        scheme = _pwd_context.identify(password_hash)
+ 
+-    return not (is_plaintext or single_hash)
++    return not (single_hash is True or scheme in single_hash)
+ 
+ 
+ @contextmanager
+diff --git a/flask_security/views.py b/flask_security/views.py
+index d87429b..25807fb 100644
+--- a/flask_security/views.py
++++ b/flask_security/views.py
+@@ -231,7 +231,6 @@ def confirm_email(token):
+ 
+     if user != current_user:
+         logout_user()
+-        login_user(user)
+ 
+     if confirm_user(user):
+         after_this_request(_commit)
+@@ -242,7 +241,7 @@ def confirm_email(token):
+     do_flash(*get_message(msg))
+ 
+     return redirect(get_url(_security.post_confirm_view) or
+-                    get_url(_security.post_login_view))
++                    get_url(_security.login_url))
+ 
+ 
+ @anonymous_user_required
+@@ -276,8 +275,10 @@ def reset_password(token):
+ 
+     expired, invalid, user = reset_password_token_status(token)
+ 
+-    if invalid:
++    if not user or invalid:
++        invalid = True
+         do_flash(*get_message('INVALID_RESET_PASSWORD_TOKEN'))
++
+     if expired:
+         send_reset_password_instructions(user)
+         do_flash(*get_message('PASSWORD_RESET_EXPIRED', email=user.email,
+@@ -291,9 +292,8 @@ def reset_password(token):
+         after_this_request(_commit)
+         update_password(user, form.password.data)
+         do_flash(*get_message('PASSWORD_RESET'))
+-        login_user(user)
+         return redirect(get_url(_security.post_reset_view) or
+-                        get_url(_security.post_login_view))
++                        get_url(_security.login_url))
+ 
+     return _security.render_template(
+         config_value('RESET_PASSWORD_TEMPLATE'),
+-- 
+2.21.0.windows.1
+
